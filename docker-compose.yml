@@ -1,0 +1,43 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "4100:4100"
+    environment:
+      NODE_ENV: production
+      PORT: 4100
+      DATABASE_URL: file:/app/apps/api/data/clip-network.db
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-replace-with-32-byte-secret-in-production}
+      BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-replace-with-hmac-webhook-secret}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-admin@clipnetwork.io}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      POSTIZ_API_KEY: ${POSTIZ_API_KEY:-}
+    volumes:
+      - clip_network_data:/app/apps/api/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4100/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:4100}
+    ports:
+      - "3100:3100"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  clip_network_data:

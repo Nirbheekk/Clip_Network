@@ -93,6 +93,205 @@ export const ClipDecisionRequestSchema = z.object({
 });
 export type ClipDecisionRequest = z.infer<typeof ClipDecisionRequestSchema>;
 
+// ============================================================================
+// SaaS Commercial Plans, Auth, Onboarding, Multi-Tenancy, Billing & Admin
+// ============================================================================
+
+export const PlanTierSchema = z.enum(['FREE', 'STARTER', 'PRO', 'ENTERPRISE']);
+export type PlanTier = z.infer<typeof PlanTierSchema>;
+
+export const WorkspaceRoleSchema = z.enum(['OWNER', 'ADMIN', 'MEMBER', 'VIEWER']);
+export type WorkspaceRole = z.infer<typeof WorkspaceRoleSchema>;
+
+export const SystemRoleSchema = z.enum(['USER', 'SUPER_ADMIN']);
+export type SystemRole = z.infer<typeof SystemRoleSchema>;
+
+export const ExecutionStatusSchema = z.enum([
+  'PENDING',
+  'QUEUED',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'TIMED_OUT',
+]);
+export type ExecutionStatus = z.infer<typeof ExecutionStatusSchema>;
+
+export interface SaasPlanDefinition {
+  id: PlanTier;
+  name: string;
+  tagline: string;
+  priceMonthlyUsd: number;
+  monthlyClipLimit: number;
+  maxCreators: number;
+  maxSocialAccounts: number;
+  apiKeysAllowed: number;
+  features: readonly string[];
+  highlighted?: boolean;
+}
+
+export const SAAS_PLANS: Record<PlanTier, SaasPlanDefinition> = {
+  FREE: {
+    id: 'FREE',
+    name: 'Free',
+    tagline: 'Test the clipping engine on your first channel.',
+    priceMonthlyUsd: 0,
+    monthlyClipLimit: 10,
+    maxCreators: 2,
+    maxSocialAccounts: 2,
+    apiKeysAllowed: 1,
+    features: [
+      '10 AI-aligned clips / month',
+      'Up to 2 tagged creators & 2 social accounts',
+      'Voice-synced captions + procedural SFX',
+      'Human approval gate + compliance scoring',
+    ],
+  },
+  STARTER: {
+    id: 'STARTER',
+    name: 'Starter',
+    tagline: 'For solo clippers running multi-platform fan pages.',
+    priceMonthlyUsd: 29,
+    monthlyClipLimit: 100,
+    maxCreators: 10,
+    maxSocialAccounts: 10,
+    apiKeysAllowed: 3,
+    features: [
+      '100 AI-aligned clips / month',
+      '10 creators & 10 linked social accounts',
+      'Opt-in auto-publishing per account',
+      'AES-256-GCM encrypted OAuth vault & API keys',
+    ],
+  },
+  PRO: {
+    id: 'PRO',
+    name: 'Pro',
+    tagline: 'High-volume clipping agencies & creator networks.',
+    priceMonthlyUsd: 99,
+    monthlyClipLimit: 500,
+    maxCreators: 50,
+    maxSocialAccounts: 50,
+    apiKeysAllowed: 10,
+    highlighted: true,
+    features: [
+      '500 AI-aligned clips / month',
+      '50 creators & 50 linked social accounts',
+      'Priority engine queue + retry & cancellation',
+      'Multi-seat RBAC workspace & full audit logs',
+    ],
+  },
+  ENTERPRISE: {
+    id: 'ENTERPRISE',
+    name: 'Enterprise',
+    tagline: 'Custom scale for media networks & brand campaigns.',
+    priceMonthlyUsd: 299,
+    monthlyClipLimit: 5000,
+    maxCreators: 500,
+    maxSocialAccounts: 500,
+    apiKeysAllowed: 50,
+    features: [
+      '5,000 AI-aligned clips / month',
+      'Unlimited campaign rules & dedicated support',
+      'Custom SLA, webhooks & compliance exports',
+      'Dedicated tenant isolation & SSO-ready auth',
+    ],
+  },
+};
+
+export const RegisterRequestSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  email: z.string().trim().email().max(180),
+  password: z
+    .string()
+    .min(8, 'Password must be at least 8 characters')
+    .max(128)
+    .regex(/[A-Za-z]/, 'Password must include a letter')
+    .regex(/[0-9]/, 'Password must include a number'),
+  workspaceName: z.string().trim().min(2).max(100).optional(),
+  termsAccepted: z.literal(true, {
+    errorMap: () => ({ message: 'You must accept the Terms of Service and Privacy Policy.' }),
+  }),
+});
+export type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
+
+export const LoginRequestSchema = z.object({
+  email: z.string().trim().email(),
+  password: z.string().min(1).max(128),
+  rememberMe: z.boolean().default(false),
+});
+export type LoginRequest = z.infer<typeof LoginRequestSchema>;
+
+export const VerifyEmailRequestSchema = z.object({
+  token: z.string().min(8).max(256),
+});
+
+export const ForgotPasswordRequestSchema = z.object({
+  email: z.string().trim().email(),
+});
+
+export const ResetPasswordRequestSchema = z.object({
+  token: z.string().min(8).max(256),
+  newPassword: z
+    .string()
+    .min(8)
+    .max(128)
+    .regex(/[A-Za-z]/)
+    .regex(/[0-9]/),
+});
+
+export const ChangePasswordRequestSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z
+    .string()
+    .min(8)
+    .max(128)
+    .regex(/[A-Za-z]/)
+    .regex(/[0-9]/),
+});
+
+export const UpdateProfileRequestSchema = z.object({
+  name: z.string().trim().min(2).max(100).optional(),
+  workspaceName: z.string().trim().min(2).max(100).optional(),
+});
+
+export const CompleteOnboardingRequestSchema = z.object({
+  workspaceName: z.string().trim().min(2).max(100),
+  primaryPlatform: CreatorPlatformSchema.default('TWITCH'),
+  selectedPlan: PlanTierSchema.default('FREE'),
+});
+
+export const CreateApiKeyRequestSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+});
+
+export const CheckoutPlanRequestSchema = z.object({
+  planTier: PlanTierSchema,
+});
+
+export const BillingWebhookPayloadSchema = z.object({
+  eventId: z.string().min(4).max(120),
+  eventType: z.enum([
+    'checkout.session.completed',
+    'invoice.paid',
+    'invoice.payment_failed',
+    'customer.subscription.deleted',
+  ]),
+  workspaceId: z.string().uuid(),
+  planTier: PlanTierSchema.optional(),
+  amountCents: z.number().int().nonnegative().default(0),
+});
+export type BillingWebhookPayload = z.infer<typeof BillingWebhookPayloadSchema>;
+
+export const CreateSupportTicketRequestSchema = z.object({
+  subject: z.string().trim().min(3).max(160),
+  message: z.string().trim().min(10).max(4000),
+  priority: z.enum(['LOW', 'NORMAL', 'HIGH']).default('NORMAL'),
+});
+
+export const AdminUpdateUserStatusSchema = z.object({
+  status: z.enum(['ACTIVE', 'SUSPENDED']),
+});
+
 export interface CampaignComplianceResult {
   passed: boolean;
   score: number;
