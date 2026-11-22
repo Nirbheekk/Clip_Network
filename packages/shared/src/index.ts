@@ -292,6 +292,15 @@ export const AdminUpdateUserStatusSchema = z.object({
   status: z.enum(['ACTIVE', 'SUSPENDED']),
 });
 
+export const AdminOverridePlanSchema = z.object({
+  planTier: PlanTierSchema,
+  subscriptionStatus: z.enum(['ACTIVE', 'PAST_DUE', 'CANCELLED']).default('ACTIVE'),
+});
+
+export const AdminUpdateTicketSchema = z.object({
+  status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']),
+});
+
 export const InviteMemberRequestSchema = z.object({
   email: z.string().trim().email().max(180),
   role: z.enum(['ADMIN', 'MEMBER', 'VIEWER']).default('MEMBER'),

@@ -636,4 +636,68 @@ describe('Clip Network Commercial SaaS — End-to-End Integration Suite', () => 
     expect(funnel.statusCode).toBe(200);
     expect(funnel.json().data.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('13. Super Admin Control Center API: BI snapshot, workspaces override, jobs, security audit & support triage', async () => {
+    const cc = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/control-center',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(cc.statusCode).toBe(200);
+    const body = cc.json().data;
+    expect(body.kpis.totalUsers).toBeGreaterThanOrEqual(3);
+    expect(body.planEconomics.length).toBe(4);
+    expect(body.integrations.length).toBe(6);
+
+    const wsRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/workspaces',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(wsRes.statusCode).toBe(200);
+    const firstWsId = wsRes.json().data[0].id as string;
+
+    const override = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/workspaces/${firstWsId}/plan`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { planTier: 'ENTERPRISE', subscriptionStatus: 'ACTIVE' },
+    });
+    expect(override.statusCode).toBe(200);
+    expect(override.json().data.monthlyClipLimit).toBe(5000);
+
+    const jobs = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/jobs',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(jobs.statusCode).toBe(200);
+    expect(jobs.json().data.clips.length).toBeGreaterThanOrEqual(1);
+
+    const sec = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/security',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(sec.statusCode).toBe(200);
+    expect(sec.json().data.auditLogs.length).toBeGreaterThanOrEqual(1);
+    expect(sec.json().data.sessions.length).toBeGreaterThanOrEqual(1);
+
+    const tickets = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/support',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(tickets.statusCode).toBe(200);
+    const ticketId = tickets.json().data[0].id as string;
+
+    const resolve = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/support/${ticketId}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { status: 'RESOLVED' },
+    });
+    expect(resolve.statusCode).toBe(200);
+    expect(resolve.json().data.status).toBe('RESOLVED');
+  });
 });

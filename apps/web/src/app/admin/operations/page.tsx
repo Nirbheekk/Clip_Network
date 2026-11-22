@@ -1,82 +1,171 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { RotateCcw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { AppShell } from '@/components/layout/AppShell';
+import { AdminSubnav } from '@/components/admin/AdminSubnav';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { apiRequest } from '@/lib/saas-types';
 
-interface HealthPayload {
-  service: string;
-  version: string;
-  database: string;
-  billingMode: string;
-  publishingMode: string;
-  emailMode: string;
-  storageMode: string;
-}
-
-interface FunnelRow {
-  eventName: string;
-  count: number;
+interface JobsPayload {
+  clips: Array<{
+    id: string;
+    title: string;
+    executionStatus: string;
+    approvalStatus: string;
+    complianceScore: number;
+    durationMs: number;
+    workspace?: { name: string };
+    creator?: { displayName: string };
+  }>;
+  posts: Array<{
+    id: string;
+    platform: string;
+    status: string;
+    executionMode: string;
+    errorMessage?: string | null;
+    workspace?: { name: string };
+    clipJob?: { title: string };
+    socialAccount?: { accountHandle: string };
+  }>;
+  videos: Array<{
+    id: string;
+    title: string;
+    detectionSource: string;
+    detectionStatus: string;
+    workspace?: { name: string };
+    creator?: { displayName: string; platform: string };
+  }>;
 }
 
 export default function AdminOperationsPage() {
-  const { token } = useAuth();
-  const [health, setHealth] = useState<HealthPayload | null>(null);
-  const [funnel, setFunnel] = useState<FunnelRow[]>([]);
+  const { token, notify } = useAuth();
+  const [jobs, setJobs] = useState<JobsPayload | null>(null);
+  const [failedOnly, setFailedOnly] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    const res = await apiRequest<JobsPayload>('/api/v1/admin/jobs', { token });
+    if (res.ok && res.json.data) setJobs(res.json.data);
+  }, [token]);
 
   useEffect(() => {
-    void apiRequest<HealthPayload>('/api/health').then((res) => {
-      if (res.ok && res.json) setHealth(res.json as unknown as HealthPayload);
+    void load();
+  }, [load]);
+
+  async function retryPost(postId: string) {
+    if (!token) return;
+    const res = await apiRequest(`/api/v1/admin/publish-posts/${postId}/retry`, {
+      method: 'POST',
+      token,
     });
-    if (token) {
-      void apiRequest<FunnelRow[]>('/api/v1/admin/funnel', { token }).then((res) => {
-        if (res.ok && res.json.data) setFunnel(res.json.data);
-      });
+    if (res.ok) {
+      await load();
+      notify('Admin publish retry executed.', 'success');
     }
-  }, [token]);
+  }
+
+  const visibleClips = (jobs?.clips ?? []).filter(
+    (c) => !failedOnly || c.executionStatus === 'FAILED' || c.approvalStatus === 'DISQUALIFIED',
+  );
+  const visiblePosts = (jobs?.posts ?? []).filter(
+    (p) => !failedOnly || p.status === 'FAILED' || p.status === 'BLOCKED',
+  );
 
   return (
     <AppShell
-      title="Platform Operations"
-      subtitle="Live integration health across Billing, Publishing, Email, Storage, and conversion funnel."
-      breadcrumb="ADMIN / OPERATIONS"
+      title="Jobs, Monitoring & Publishing Ops"
+      subtitle="Platform-wide clip executions, failed job triage, channel uploads, and publish retries."
+      breadcrumb="ADMIN / JOBS & OPS"
       requireSuperAdmin
+      actions={
+        <Button
+          size="sm"
+          variant={failedOnly ? 'default' : 'outline'}
+          onClick={() => setFailedOnly((f) => !f)}
+        >
+          {failedOnly ? 'Showing Failures Only' : 'Filter Failures Only'}
+        </Button>
+      }
     >
+      <AdminSubnav />
+
       <div className="space-y-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[
-            { label: 'API Service & Version', value: health ? `${health.service} (${health.version})` : 'Checking...' },
-            { label: 'Database', value: health?.database ?? 'Checking...' },
-            { label: 'Billing Mode', value: health?.billingMode ?? 'Checking...' },
-            { label: 'Publishing Mode', value: health?.publishingMode ?? 'Checking...' },
-            { label: 'Email Provider Mode', value: health?.emailMode ?? 'Checking...' },
-            { label: 'Object Storage Mode', value: health?.storageMode ?? 'Checking...' },
-          ].map((item) => (
-            <div key={item.label} className="rounded-lg border border-border bg-card p-5 space-y-2">
-              <div className="text-xs text-muted-foreground">{item.label}</div>
-              <Badge variant="outline" className="font-mono text-xs">{item.value}</Badge>
-            </div>
-          ))}
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          <div className="border-b border-border px-5 py-3.5 text-sm font-display font-semibold">
+            Platform Clip Jobs ({visibleClips.length})
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-border font-mono text-muted-foreground">
+                <tr>
+                  <th className="p-3.5">Clip</th>
+                  <th className="p-3.5">Workspace</th>
+                  <th className="p-3.5">Status</th>
+                  <th className="p-3.5">Approval</th>
+                  <th className="p-3.5">Score / Duration</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border tabular-nums">
+                {visibleClips.map((c) => (
+                  <tr key={c.id}>
+                    <td className="p-3.5 font-medium">{c.title}</td>
+                    <td className="p-3.5 text-muted-foreground">{c.workspace?.name ?? '—'}</td>
+                    <td className="p-3.5"><Badge variant="outline">{c.executionStatus}</Badge></td>
+                    <td className="p-3.5 font-mono text-[11px]">{c.approvalStatus}</td>
+                    <td className="p-3.5 font-mono">{c.complianceScore}/100 • {c.durationMs}ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           <div className="border-b border-border px-5 py-3.5 text-sm font-display font-semibold">
-            Privacy-Safe Conversion Funnel Telemetry
+            Platform Publish Queue ({visiblePosts.length})
           </div>
-          {funnel.length === 0 ? (
-            <div className="p-6 text-xs text-muted-foreground">No funnel events recorded yet.</div>
-          ) : (
-            <div className="divide-y divide-border">
-              {funnel.map((f) => (
-                <div key={f.eventName} className="flex items-center justify-between px-5 py-3 text-xs font-mono">
-                  <span>{f.eventName}</span>
-                  <span className="font-semibold">{f.count}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-border font-mono text-muted-foreground">
+                <tr>
+                  <th className="p-3.5">Clip &amp; Account</th>
+                  <th className="p-3.5">Workspace</th>
+                  <th className="p-3.5">Mode</th>
+                  <th className="p-3.5">Status</th>
+                  <th className="p-3.5 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {visiblePosts.map((p) => (
+                  <tr key={p.id}>
+                    <td className="p-3.5">
+                      <div className="font-medium">{p.clipJob?.title ?? 'Clip'}</div>
+                      <div className="font-mono text-[10px] text-muted-foreground">
+                        {p.socialAccount?.accountHandle} ({p.platform})
+                      </div>
+                    </td>
+                    <td className="p-3.5 text-muted-foreground">{p.workspace?.name ?? '—'}</td>
+                    <td className="p-3.5 font-mono text-[11px]">{p.executionMode}</td>
+                    <td className="p-3.5">
+                      <Badge variant={p.status === 'FAILED' || p.status === 'BLOCKED' ? 'destructive' : 'outline'}>
+                        {p.status}
+                      </Badge>
+                    </td>
+                    <td className="p-3.5 text-right">
+                      {p.status === 'FAILED' && (
+                        <Button size="sm" variant="outline" onClick={() => retryPost(p.id)}>
+                          <RotateCcw className="mr-1.5 h-3 w-3" /> Retry
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </AppShell>

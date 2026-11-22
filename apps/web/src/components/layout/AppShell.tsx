@@ -130,10 +130,13 @@ export function AppShell({
           {
             label: 'Platform Admin',
             items: [
-              { href: '/admin', label: 'Admin Overview', icon: ShieldAlert },
+              { href: '/admin', label: 'Control Center', icon: ShieldAlert },
               { href: '/admin/users', label: 'Users', icon: Users },
-              { href: '/admin/subscriptions', label: 'Subscriptions', icon: CreditCard },
-              { href: '/admin/operations', label: 'Operations', icon: Activity },
+              { href: '/admin/workspaces', label: 'Workspaces', icon: LayoutDashboard },
+              { href: '/admin/subscriptions', label: 'Revenue & Plans', icon: CreditCard },
+              { href: '/admin/operations', label: 'Jobs & Ops', icon: Activity },
+              { href: '/admin/security', label: 'Security & Audit', icon: ShieldCheck },
+              { href: '/admin/support', label: 'Support Triage', icon: LifeBuoy },
             ],
           },
         ]

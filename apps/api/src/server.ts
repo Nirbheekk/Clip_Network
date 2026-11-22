@@ -66,6 +66,7 @@ import {
 } from './integrations/storage.js';
 import { ensureCurrentBillingPeriod, getUtcBillingMonthStart } from './billing-period.js';
 import { scanWorkspaceChannels } from './services/channel-monitor.js';
+import { registerSuperAdminControlCenterRoutes } from './admin-routes.js';
 
 function slugifyWorkspace(name: string): string {
   const base = name
@@ -2806,6 +2807,11 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       success: true,
       data: events.map((e) => ({ eventName: e.eventName, count: e._count.eventName })),
     };
+  });
+
+  registerSuperAdminControlCenterRoutes(app, prisma, {
+    logAudit,
+    executePublishPost,
   });
 
   return app;
