@@ -10,11 +10,12 @@ COPY apps/api/package.json apps/api/
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
+ARG PRISMA_SCHEMA=prisma/schema.prisma
 COPY packages ./packages
 COPY apps/api ./apps/api
 RUN pnpm --filter @clip-network/shared build \
  && pnpm --filter @clip-network/clip-engine build \
- && pnpm --filter @clip-network/api exec prisma generate \
+ && pnpm --filter @clip-network/api exec prisma generate --schema=${PRISMA_SCHEMA} \
  && pnpm --filter @clip-network/api build
 
 FROM node:22-alpine AS runner

@@ -137,27 +137,37 @@ export async function sendTransactionalEmail(params: {
     return { delivered: true, mode: 'SANDBOX_LOG' };
   }
 
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from,
-        to: [params.to],
-        subject: rendered.subject,
-        html: rendered.html,
-        text: rendered.text,
-      }),
-    });
-    if (!res.ok) {
-      return { delivered: false, mode: 'RESEND_LIVE' };
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from,
+          to: [params.to],
+          subject: rendered.subject,
+          html: rendered.html,
+          text: rendered.text,
+        }),
+      });
+      if (res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { id?: string };
+        return { delivered: true, mode: 'RESEND_LIVE', ...(body.id ? { providerId: body.id } : {}) };
+      }
+      // Retry only on transient 5xx / 429 rate-limit responses
+      if (res.status < 500 && res.status !== 429) {
+        return { delivered: false, mode: 'RESEND_LIVE' };
+      }
+    } catch {
+      // Transient network error — retry below
     }
-    const body = (await res.json().catch(() => ({}))) as { id?: string };
-    return { delivered: true, mode: 'RESEND_LIVE', ...(body.id ? { providerId: body.id } : {}) };
-  } catch {
-    return { delivered: false, mode: 'RESEND_LIVE' };
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
   }
+  return { delivered: false, mode: 'RESEND_LIVE' };
 }

@@ -4,6 +4,7 @@ import { validatePostForPlatform } from '../integrations/publishing.js';
 import { buildTenantClipObjectKey, createPresignedS3Url } from '../integrations/storage.js';
 import { renderBrandedEmail } from '../integrations/email.js';
 import { parseYouTubeAtomLatestVideo } from '../integrations/scheduler.js';
+import { getUtcBillingMonthStart, isBillingPeriodExpired } from '../billing-period.js';
 
 describe('Production Security & External Integration Adapters', () => {
   it('1. SSRF guard blocks loopback, private CIDR, cloud metadata & non-HTTP schemes', () => {
@@ -88,5 +89,14 @@ describe('Production Security & External Integration Adapters', () => {
     expect(parsed?.externalVideoId).toBe('dQw4w9WgXcQ');
     expect(parsed?.title).toBe('Latest Creator Stream Highlight');
     expect(parsed?.videoUrl).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  });
+
+  it('6. UTC monthly billing period rollover detects expired periods cleanly without timezone drift', () => {
+    const novMid = new Date('2026-11-22T12:00:00Z');
+    const novStart = getUtcBillingMonthStart(novMid);
+    expect(novStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+    expect(isBillingPeriodExpired(new Date('2026-10-31T23:59:59Z'), novMid)).toBe(true);
+    expect(isBillingPeriodExpired(new Date('2026-11-01T00:00:00Z'), novMid)).toBe(false);
+    expect(isBillingPeriodExpired(new Date('2026-11-15T10:00:00Z'), novMid)).toBe(false);
   });
 });

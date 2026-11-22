@@ -64,7 +64,8 @@ import {
   createPresignedS3Url,
   getS3StorageConfig,
 } from './integrations/storage.js';
-import { tryFetchYouTubeChannelLatest } from './integrations/scheduler.js';
+import { ensureCurrentBillingPeriod, getUtcBillingMonthStart } from './billing-period.js';
+import { scanWorkspaceChannels } from './services/channel-monitor.js';
 
 function slugifyWorkspace(name: string): string {
   const base = name
@@ -76,7 +77,43 @@ function slugifyWorkspace(name: string): string {
 }
 
 export function buildServer(prisma: PrismaClient): FastifyInstance {
-  const app = Fastify({ logger: false });
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const app = Fastify({
+    logger: isProd
+      ? {
+          level: process.env['LOG_LEVEL'] ?? 'info',
+          redact: [
+            'req.headers.authorization',
+            'req.headers["x-api-key"]',
+            'req.headers.cookie',
+            '*.password',
+            '*.token',
+          ],
+        }
+      : false,
+  });
+
+  // Never leak stack traces, Prisma internals, or secrets in HTTP 500 responses
+  app.setErrorHandler((err, _request, reply) => {
+    const statusCode =
+      typeof (err as { statusCode?: number }).statusCode === 'number'
+        ? (err as { statusCode: number }).statusCode
+        : 500;
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    if (statusCode >= 500) {
+      app.log.error({ err: msg }, 'Unhandled internal server error');
+      return reply.status(500).send({
+        success: false,
+        errorCode: 'INTERNAL_SERVER_ERROR',
+        error: 'An unexpected internal error occurred. Please retry or contact support.',
+      });
+    }
+    return reply.status(statusCode).send({
+      success: false,
+      errorCode: 'REQUEST_ERROR',
+      error: msg || 'Bad request.',
+    });
+  });
   void app.register(cors, {
     origin: true,
     allowedHeaders: [
@@ -108,7 +145,6 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
   );
 
   const authRateLimiter = new SlidingWindowRateLimiter(30, 60_000);
-  const isProd = process.env['NODE_ENV'] === 'production';
 
   async function trackConversion(eventName: string, workspaceId?: string, metadata: unknown = {}) {
     await prisma.conversionEvent
@@ -1051,8 +1087,8 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       return reply.status(400).send({ success: false, error: parsed.error.flatten() });
     }
 
-    // Server-side Subscription Quota Enforcement (402 Payment Required)
-    const workspace = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
+    // Server-side Subscription Quota Enforcement with UTC monthly rollover (402 Payment Required)
+    const workspace = await ensureCurrentBillingPeriod(prisma, ctx.workspaceId);
     if (!workspace) {
       return reply.status(404).send({ success: false, error: 'Workspace not found' });
     }
@@ -1576,18 +1612,95 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
           },
         });
       }
+    } else if (event.type === 'invoice.paid') {
+      const invoice = event.data.object;
+      const customerId = typeof invoice.customer === 'string' ? invoice.customer : undefined;
+      if (customerId) {
+        const ws = await prisma.workspace.findFirst({ where: { stripeCustomerId: customerId } });
+        if (ws) {
+          await prisma.$transaction([
+            prisma.workspace.update({
+              where: { id: ws.id },
+              data: {
+                subscriptionStatus: 'ACTIVE',
+                clipsUsedThisPeriod: 0,
+                periodResetAt: getUtcBillingMonthStart(),
+              },
+            }),
+            prisma.subscriptionInvoice.create({
+              data: {
+                workspaceId: ws.id,
+                externalEventId: event.id,
+                planTier: ws.planTier,
+                amountCents: invoice.amount_paid ?? 0,
+                status: 'PAID',
+                providerMode: 'STRIPE_LIVE',
+              },
+            }),
+          ]);
+        }
+      }
+    } else if (event.type === 'invoice.payment_failed') {
+      const invoice = event.data.object;
+      const customerId = typeof invoice.customer === 'string' ? invoice.customer : undefined;
+      if (customerId) {
+        const ws = await prisma.workspace.findFirst({ where: { stripeCustomerId: customerId } });
+        if (ws) {
+          await prisma.$transaction([
+            prisma.workspace.update({
+              where: { id: ws.id },
+              data: { subscriptionStatus: 'PAST_DUE' },
+            }),
+            prisma.subscriptionInvoice.create({
+              data: {
+                workspaceId: ws.id,
+                externalEventId: event.id,
+                planTier: ws.planTier,
+                amountCents: invoice.amount_due ?? 0,
+                status: 'FAILED',
+                providerMode: 'STRIPE_LIVE',
+              },
+            }),
+          ]);
+          const owner = await prisma.workspaceMember.findFirst({
+            where: { workspaceId: ws.id, role: 'OWNER' },
+            include: { user: true },
+          });
+          if (owner?.user.email) {
+            const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+            void sendTransactionalEmail({
+              to: owner.user.email,
+              kind: 'PAYMENT_FAILED',
+              workspaceName: ws.name,
+              actionUrl: `${publicAppUrl}/settings/billing`,
+            });
+          }
+        }
+      }
     } else if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       const workspaceId = sub.metadata?.['workspaceId'];
       if (workspaceId) {
-        await prisma.workspace.update({
+        const ws = await prisma.workspace.update({
           where: { id: workspaceId },
           data: {
             planTier: 'FREE',
             monthlyClipLimit: SAAS_PLANS.FREE.monthlyClipLimit,
             subscriptionStatus: 'CANCELLED',
+            stripeSubscriptionId: null,
           },
         });
+        const owner = await prisma.workspaceMember.findFirst({
+          where: { workspaceId: ws.id, role: 'OWNER' },
+          include: { user: true },
+        });
+        if (owner?.user.email) {
+          void sendTransactionalEmail({
+            to: owner.user.email,
+            kind: 'SUBSCRIPTION_CANCELLED',
+            workspaceName: ws.name,
+          });
+        }
       }
     }
 
@@ -1747,6 +1860,42 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     return {
       success: true,
       data: { storageMode: 'S3_LIVE', objectKey, signedUrl, expiresSec: 900 },
+    };
+  });
+
+  app.post('/api/v1/clips/:clipId/upload-url', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
+    if (!ctx) return;
+    const { clipId } = request.params as { clipId: string };
+    const clip = await prisma.clipJob.findFirst({
+      where: { id: clipId, workspaceId: ctx.workspaceId },
+    });
+    if (!clip) return reply.status(404).send({ success: false, error: 'Clip not found' });
+
+    const body = (request.body ?? {}) as { ext?: string };
+    const ext = body.ext === 'png' || body.ext === 'jpg' || body.ext === 'ass' ? body.ext : 'mp4';
+    const objectKey = buildTenantClipObjectKey(ctx.workspaceId, clip.id, ext);
+    const s3 = getS3StorageConfig();
+    if (!s3) {
+      return {
+        success: true,
+        data: {
+          storageMode: 'LOCAL_SANDBOX',
+          objectKey,
+          uploadUrl: null,
+          message: 'Configure S3_* env vars to issue presigned PUT upload URLs.',
+        },
+      };
+    }
+    const uploadUrl = createPresignedS3Url({
+      config: s3,
+      method: 'PUT',
+      objectKey,
+      expiresSec: 900,
+    });
+    return {
+      success: true,
+      data: { storageMode: 'S3_LIVE', objectKey, uploadUrl, expiresSec: 900 },
     };
   });
 
@@ -2165,216 +2314,19 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
     if (!ctx) return;
     const body = (request.body ?? {}) as { creatorId?: string; autoExecute?: boolean };
-    const autoExecute = body.autoExecute !== false;
 
-    const workspace = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
-    if (!workspace) return reply.status(404).send({ success: false, error: 'Workspace not found' });
-
-    const creators = await prisma.creatorAccount.findMany({
-      where: {
-        workspaceId: ctx.workspaceId,
-        ...(body.creatorId ? { id: body.creatorId } : { autoMonitorEnabled: true }),
-      },
-      include: { routes: { where: { enabled: true }, include: { socialAccount: true } } },
+    const result = await scanWorkspaceChannels({
+      prisma,
+      workspaceId: ctx.workspaceId,
+      userId: ctx.userId,
+      ...(body.creatorId ? { creatorId: body.creatorId } : {}),
+      ...(typeof body.autoExecute === 'boolean' ? { autoExecute: body.autoExecute } : {}),
+      executePublishPost,
+      trackConversion,
+      logAudit,
     });
-
-    const detectedVideos = [];
-    const createdClips = [];
-    const routedPostsAll = [];
-
-    for (const creator of creators) {
-      await prisma.creatorAccount.update({
-        where: { id: creator.id },
-        data: { lastPolledAt: new Date() },
-      });
-
-      const requiredTopics = JSON.parse(creator.requiredTopicsJson) as string[];
-      const bannedKeywords = JSON.parse(creator.bannedKeywordsJson) as string[];
-      const tags = JSON.parse(creator.tagsJson) as string[];
-      const primaryTopic = requiredTopics[0] ?? 'Live Stream';
-
-      const liveAtomVideo =
-        creator.platform === 'YOUTUBE'
-          ? await tryFetchYouTubeChannelLatest(creator.channelUrl)
-          : null;
-      const existingAtom = liveAtomVideo
-        ? await prisma.channelVideo.findUnique({
-            where: {
-              creatorId_externalVideoId: {
-                creatorId: creator.id,
-                externalVideoId: liveAtomVideo.externalVideoId,
-              },
-            },
-          })
-        : null;
-
-      const useAtom = Boolean(liveAtomVideo && !existingAtom);
-      const externalVideoId = useAtom
-        ? liveAtomVideo!.externalVideoId
-        : `vid_${creator.handle}_${Date.now().toString(36).slice(-5)}`;
-      const videoTitle = useAtom
-        ? liveAtomVideo!.title
-        : `${creator.displayName} — New ${primaryTopic} Upload (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
-      const videoUrl = useAtom
-        ? liveAtomVideo!.videoUrl
-        : `${creator.channelUrl.replace(/\/$/, '')}/videos/${externalVideoId}`;
-
-      const channelVideo = await prisma.channelVideo.create({
-        data: {
-          workspaceId: ctx.workspaceId,
-          creatorId: creator.id,
-          externalVideoId,
-          title: videoTitle,
-          videoUrl,
-          durationSec: 2400,
-          detectionSource: useAtom ? 'YOUTUBE_ATOM_FEED' : 'CHANNEL_FEED_SCAN',
-          detectionStatus: autoExecute ? 'PROCESSING' : 'DETECTED',
-        },
-      });
-      await trackConversion('VIDEO_DETECTED', ctx.workspaceId, {
-        platform: creator.platform,
-        source: useAtom ? 'YOUTUBE_ATOM_FEED' : 'CHANNEL_FEED_SCAN',
-      });
-
-      if (autoExecute) {
-        const freshWs = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
-        if (!freshWs || freshWs.clipsUsedThisPeriod >= freshWs.monthlyClipLimit) {
-          await prisma.channelVideo.update({
-            where: { id: channelVideo.id },
-            data: { detectionStatus: 'SKIPPED' },
-          });
-          detectedVideos.push({ ...channelVideo, detectionStatus: 'SKIPPED', creator });
-          continue;
-        }
-
-        const startedAt = Date.now();
-        const transcript = `${creator.displayName} just dropped a new ${primaryTopic} moment on ${creator.platform}! Chat reacted instantly to the highlight.`;
-        const compliance = evaluateClipCompliance({
-          transcript,
-          caption: videoTitle,
-          requiredTopics,
-          bannedKeywords,
-          disallowLogos: creator.disallowLogos,
-          hasAddedLogos: false,
-        });
-        const speechCues = alignTranscriptToSpeechWindows(transcript, [
-          { startSec: 0.1, endSec: 11.2 },
-          { startSec: 11.6, endSec: 23.0 },
-        ]);
-        const captionStyle = creator.defaultCaptionStyle as
-          | 'HIGH_ENERGY'
-          | 'BOLD_CREATOR'
-          | 'CLEAN_MINIMAL'
-          | 'PODCAST_PREMIUM';
-        const assScript = buildWordSyncedAss(speechCues, captionStyle);
-        const sfxCues = creator.enableSfx ? buildAutoSfxCuesForCuts([11.2, 18.0]) : [];
-        const durationMs = Math.max(1, Date.now() - startedAt);
-        const executionLogs = [
-          `[${new Date().toISOString()}] MONITOR: Detected new upload "${videoTitle}" on @${creator.handle}`,
-          `[${new Date().toISOString()}] COMPLIANCE: score=${compliance.score}/100 passed=${String(compliance.passed)}`,
-          `[${new Date().toISOString()}] ENGINE: Aligned ${speechCues.length} caption cues + ${sfxCues.length} SFX cues`,
-          `[${new Date().toISOString()}] COMPLETED in ${durationMs}ms`,
-        ];
-
-        const [clipJob] = await prisma.$transaction([
-          prisma.clipJob.create({
-            data: {
-              workspaceId: ctx.workspaceId,
-              creatorId: creator.id,
-              sourceUrl: videoUrl,
-              title: videoTitle,
-              startSec: 120,
-              endSec: 143,
-              durationSec: 23,
-              transcript,
-              layout: creator.defaultLayout,
-              captionStyle,
-              enableSfx: creator.enableSfx,
-              sfxCuesJson: JSON.stringify(sfxCues),
-              assScript,
-              executionStatus: 'COMPLETED',
-              executionLogsJson: JSON.stringify(executionLogs),
-              durationMs,
-              compliancePassed: compliance.passed,
-              complianceScore: compliance.score,
-              complianceReportJson: JSON.stringify(compliance),
-              approvalStatus: compliance.passed ? 'AWAITING_APPROVAL' : 'DISQUALIFIED',
-            },
-          }),
-          prisma.workspace.update({
-            where: { id: ctx.workspaceId },
-            data: { clipsUsedThisPeriod: { increment: 1 } },
-          }),
-        ]);
-
-        await prisma.channelVideo.update({
-          where: { id: channelVideo.id },
-          data: { detectionStatus: 'CLIPPED', clipJobId: clipJob.id },
-        });
-        createdClips.push(clipJob);
-
-        if (compliance.passed) {
-          for (const route of creator.routes) {
-            if (compliance.score < route.minComplianceScore) continue;
-            const routeTags = JSON.parse(route.hashtagsJson) as string[];
-            const tagLine = [...tags, ...routeTags]
-              .map((t) => (t.startsWith('#') ? t : `#${t.replace(/\s+/g, '')}`))
-              .join(' ');
-            const captionText = route.captionTemplate
-              .replace('{hook}', videoTitle)
-              .replace('{tags}', tagLine)
-              .trim();
-
-            const post = await prisma.publishPost.create({
-              data: {
-                workspaceId: ctx.workspaceId,
-                clipJobId: clipJob.id,
-                socialAccountId: route.socialAccountId,
-                idempotencyKey: `clip-${clipJob.id}-acct-${route.socialAccountId}`,
-                platform: route.socialAccount.platform,
-                captionText,
-                status: 'AWAITING_APPROVAL',
-                executionMode: route.socialAccount.integrationMode,
-              },
-            });
-
-            if (route.socialAccount.autoPublishApproved) {
-              const published = await executePublishPost(post.id, ctx.workspaceId, ctx.userId);
-              if (published) routedPostsAll.push(published);
-            } else {
-              routedPostsAll.push(post);
-            }
-          }
-        }
-        detectedVideos.push({ ...channelVideo, detectionStatus: 'CLIPPED', clipJobId: clipJob.id, creator });
-      } else {
-        detectedVideos.push({ ...channelVideo, creator });
-      }
-    }
-
-    await logAudit(
-      'CHANNEL_MONITOR_SCAN_COMPLETED',
-      'Workspace',
-      ctx.workspaceId,
-      {
-        creatorsScanned: creators.length,
-        videosDetected: detectedVideos.length,
-        clipsCreated: createdClips.length,
-        postsRouted: routedPostsAll.length,
-      },
-      ctx.workspaceId,
-      ctx.userId,
-    );
-
-    return {
-      success: true,
-      data: {
-        creatorsScanned: creators.length,
-        detectedVideos,
-        clipsCreated: createdClips.length,
-        postsRouted: routedPostsAll.length,
-      },
-    };
+    if (!result) return reply.status(404).send({ success: false, error: 'Workspace not found' });
+    return { success: true, data: result };
   });
 
   app.post('/api/v1/analytics/sync-metrics', async (request, reply) => {
