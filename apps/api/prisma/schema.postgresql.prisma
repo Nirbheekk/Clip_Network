@@ -1,0 +1,366 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Identity, Authentication & Multi-Tenant Workspaces
+// ============================================================================
+
+model User {
+  id                     String    @id @default(uuid())
+  email                  String    @unique
+  name                   String
+  passwordHash           String
+  systemRole             String    @default("USER") // USER, SUPER_ADMIN
+  status                 String    @default("ACTIVE") // ACTIVE, SUSPENDED
+  emailVerifiedAt        DateTime?
+  emailVerificationToken String?
+  passwordResetToken     String?
+  passwordResetExpiresAt DateTime?
+  termsAcceptedAt        DateTime  @default(now())
+  onboardingCompleted    Boolean   @default(false)
+  onboardingStep         Int       @default(1)
+  notificationPrefsJson  String    @default("{\"approvals\":true,\"failures\":true,\"billing\":true,\"security\":true}")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  sessions       Session[]
+  memberships    WorkspaceMember[]
+  apiKeys        ApiKey[]
+  supportTickets SupportTicket[]
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Workspace {
+  id                   String    @id @default(uuid())
+  name                 String
+  slug                 String    @unique
+  planTier             String    @default("FREE") // FREE, STARTER, PRO, ENTERPRISE
+  subscriptionStatus   String    @default("ACTIVE") // ACTIVE, PAST_DUE, CANCELLED
+  billingProviderMode  String    @default("SANDBOX_WEBHOOK") // SANDBOX_WEBHOOK, STRIPE_LIVE
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  monthlyClipLimit     Int       @default(10)
+  clipsUsedThisPeriod  Int       @default(0)
+  periodResetAt        DateTime  @default(now())
+  primaryPlatform      String    @default("TWITCH")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  members          WorkspaceMember[]
+  invites          WorkspaceInvite[]
+  apiKeys          ApiKey[]
+  invoices         SubscriptionInvoice[]
+  supportTickets   SupportTicket[]
+  creators         CreatorAccount[]
+  socialAccounts   SocialAccount[]
+  routes           CreatorRouteRule[]
+  clips            ClipJob[]
+  publishPosts     PublishPost[]
+  channelVideos    ChannelVideo[]
+  metricSnapshots  PostMetricSnapshot[]
+  conversionEvents ConversionEvent[]
+  auditLogs        AuditLog[]
+}
+
+model WorkspaceMember {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        String   @default("OWNER") // OWNER, ADMIN, MEMBER, VIEWER
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+model WorkspaceInvite {
+  id          String    @id @default(uuid())
+  workspaceId String
+  email       String
+  role        String    @default("MEMBER") // ADMIN, MEMBER, VIEWER
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([email])
+}
+
+model ConversionEvent {
+  id           String   @id @default(uuid())
+  workspaceId  String?
+  eventName    String
+  metadataJson String   @default("{}")
+  createdAt    DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([eventName])
+  @@index([workspaceId])
+}
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  workspaceId String
+  userId      String
+  name        String
+  keyPrefix   String
+  keyHash     String    @unique
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model SubscriptionInvoice {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  externalEventId String   @unique
+  planTier        String
+  amountCents     Int
+  currency        String   @default("USD")
+  status          String   @default("PAID") // PAID, FAILED, REFUNDED
+  providerMode    String   @default("SANDBOX_WEBHOOK")
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model SupportTicket {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String
+  subject     String
+  message     String
+  priority    String   @default("NORMAL") // LOW, NORMAL, HIGH
+  status      String   @default("OPEN") // OPEN, IN_PROGRESS, RESOLVED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+// ============================================================================
+// Tenant-Scoped Core Clip Engine & Routing Domain Models
+// ============================================================================
+
+model CreatorAccount {
+  id                  String    @id @default(uuid())
+  workspaceId         String
+  handle              String
+  displayName         String
+  platform            String    // TWITCH, YOUTUBE, KICK
+  channelUrl          String
+  autoMonitorEnabled  Boolean   @default(true)
+  lastPolledAt        DateTime?
+  tagsJson            String    @default("[]")
+  requiredTopicsJson  String    @default("[]")
+  bannedKeywordsJson  String    @default("[]")
+  disallowLogos       Boolean   @default(true)
+  defaultLayout       String    @default("SPLIT_FACECAM_BOTTOM")
+  defaultCaptionStyle String    @default("HIGH_ENERGY")
+  enableSfx           Boolean   @default(true)
+  facecamCropJson     String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  routes        CreatorRouteRule[]
+  clips         ClipJob[]
+  channelVideos ChannelVideo[]
+
+  @@unique([workspaceId, handle])
+  @@index([workspaceId])
+}
+
+model SocialAccount {
+  id                  String   @id @default(uuid())
+  workspaceId         String
+  platform            String   // INSTAGRAM_REELS, TIKTOK, YOUTUBE_SHORTS, X
+  accountName         String
+  accountHandle       String
+  encryptedToken      String?
+  autoPublishApproved Boolean  @default(false) // Human approval gate by default
+  timezone            String   @default("UTC")
+  integrationMode     String   @default("SANDBOX_SIMULATED") // SANDBOX_SIMULATED or LIVE_OAUTH
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  workspace    Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  routes       CreatorRouteRule[]
+  publishPosts PublishPost[]
+
+  @@unique([workspaceId, platform, accountHandle])
+  @@index([workspaceId])
+}
+
+model CreatorRouteRule {
+  id                 String   @id @default(uuid())
+  workspaceId        String
+  creatorId          String
+  socialAccountId    String
+  minComplianceScore Int      @default(75)
+  captionTemplate    String   @default("{hook} {tags}")
+  hashtagsJson       String   @default("[]")
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator       CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount  @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorId, socialAccountId])
+  @@index([workspaceId])
+}
+
+model ClipJob {
+  id                   String    @id @default(uuid())
+  workspaceId          String
+  creatorId            String
+  sourceUrl            String
+  title                String
+  startSec             Float
+  endSec               Float
+  durationSec          Float
+  transcript           String
+  layout               String
+  captionStyle         String
+  enableSfx            Boolean   @default(true)
+  sfxCuesJson          String    @default("[]")
+  assScript            String
+  outputMp4Path        String?
+  executionStatus      String    @default("COMPLETED") // PENDING, QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED, TIMED_OUT
+  executionLogsJson    String    @default("[]")
+  durationMs           Int       @default(0)
+  errorMessage         String?
+  compliancePassed     Boolean
+  complianceScore      Int
+  complianceReportJson String
+  approvalStatus       String    @default("AWAITING_APPROVAL") // AWAITING_APPROVAL, APPROVED, REJECTED, DISQUALIFIED
+  approvedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator      CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  publishPosts PublishPost[]
+
+  @@index([workspaceId])
+  @@index([creatorId])
+}
+
+model PublishPost {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  clipJobId       String
+  socialAccountId String
+  idempotencyKey  String    @unique
+  platform        String
+  captionText     String
+  status          String    @default("AWAITING_APPROVAL") // AWAITING_APPROVAL, SCHEDULED, PUBLISHED_SANDBOX, PUBLISHED_LIVE, FAILED, BLOCKED
+  executionMode   String    @default("SANDBOX_SIMULATED")
+  externalPostId  String?
+  errorMessage    String?
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  clipJob         ClipJob              @relation(fields: [clipJobId], references: [id], onDelete: Cascade)
+  socialAccount   SocialAccount        @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  metricSnapshots PostMetricSnapshot[]
+
+  @@index([workspaceId])
+}
+
+model ChannelVideo {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  creatorId       String
+  externalVideoId String
+  title           String
+  videoUrl        String
+  durationSec     Float    @default(1800)
+  detectionSource String   @default("CHANNEL_FEED_SCAN") // YOUTUBE_ATOM_FEED, CHANNEL_FEED_SCAN
+  detectionStatus String   @default("DETECTED") // DETECTED, PROCESSING, CLIPPED, SKIPPED
+  clipJobId       String?
+  publishedAt     DateTime @default(now())
+  detectedAt      DateTime @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator   CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorId, externalVideoId])
+  @@index([workspaceId])
+  @@index([creatorId])
+}
+
+model PostMetricSnapshot {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  publishPostId     String
+  views             Int      @default(0)
+  likes             Int      @default(0)
+  comments          Int      @default(0)
+  shares            Int      @default(0)
+  watchTimeAvgSec   Float    @default(0)
+  completionRatePct Float    @default(0)
+  sourceMode        String   @default("SANDBOX_SIMULATED") // SANDBOX_SIMULATED, LIVE_PLATFORM_API
+  capturedAt        DateTime @default(now())
+
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  publishPost PublishPost @relation(fields: [publishPostId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([publishPostId])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String?
+  userId      String?
+  action      String
+  entityType  String
+  entityId    String
+  details     String
+  createdAt   DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+}

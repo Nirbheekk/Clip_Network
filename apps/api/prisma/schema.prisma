@@ -25,6 +25,7 @@ model User {
   termsAcceptedAt        DateTime  @default(now())
   onboardingCompleted    Boolean   @default(false)
   onboardingStep         Int       @default(1)
+  notificationPrefsJson  String    @default("{\"approvals\":true,\"failures\":true,\"billing\":true,\"security\":true}")
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
@@ -64,18 +65,20 @@ model Workspace {
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  members         WorkspaceMember[]
-  apiKeys         ApiKey[]
-  invoices        SubscriptionInvoice[]
-  supportTickets  SupportTicket[]
-  creators        CreatorAccount[]
-  socialAccounts  SocialAccount[]
-  routes          CreatorRouteRule[]
-  clips           ClipJob[]
-  publishPosts    PublishPost[]
-  channelVideos   ChannelVideo[]
-  metricSnapshots PostMetricSnapshot[]
-  auditLogs       AuditLog[]
+  members          WorkspaceMember[]
+  invites          WorkspaceInvite[]
+  apiKeys          ApiKey[]
+  invoices         SubscriptionInvoice[]
+  supportTickets   SupportTicket[]
+  creators         CreatorAccount[]
+  socialAccounts   SocialAccount[]
+  routes           CreatorRouteRule[]
+  clips            ClipJob[]
+  publishPosts     PublishPost[]
+  channelVideos    ChannelVideo[]
+  metricSnapshots  PostMetricSnapshot[]
+  conversionEvents ConversionEvent[]
+  auditLogs        AuditLog[]
 }
 
 model WorkspaceMember {
@@ -90,6 +93,36 @@ model WorkspaceMember {
 
   @@unique([workspaceId, userId])
   @@index([userId])
+}
+
+model WorkspaceInvite {
+  id          String    @id @default(uuid())
+  workspaceId String
+  email       String
+  role        String    @default("MEMBER") // ADMIN, MEMBER, VIEWER
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([email])
+}
+
+model ConversionEvent {
+  id           String   @id @default(uuid())
+  workspaceId  String?
+  eventName    String
+  metadataJson String   @default("{}")
+  createdAt    DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([eventName])
+  @@index([workspaceId])
 }
 
 model ApiKey {

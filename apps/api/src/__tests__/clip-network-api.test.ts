@@ -495,4 +495,145 @@ describe('Clip Network Commercial SaaS — End-to-End Integration Suite', () => 
     });
     expect(afterLogout.statusCode).toBe(401);
   });
+
+  it('11. WORKFLOW 6: Team Invite -> Accept -> VIEWER blocked (403) -> Promote to MEMBER -> Permitted -> Remove', async () => {
+    // Register Workspace Owner C & Teammate D
+    const ownerC = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        name: 'Agency Owner',
+        email: 'owner-c@agency.io',
+        password: 'Password123',
+        workspaceName: 'Agency C',
+        termsAccepted: true,
+      },
+    });
+    const ownerToken = ownerC.json().data.token as string;
+    const agencyWsId = ownerC.json().data.workspace.id as string;
+
+    const teammateD = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        name: 'Viewer Teammate',
+        email: 'viewer-d@agency.io',
+        password: 'Password123',
+        termsAccepted: true,
+      },
+    });
+    const teammateToken = teammateD.json().data.token as string;
+
+    // Owner invites Teammate D as VIEWER
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/workspace/members/invite',
+      headers: { authorization: `Bearer ${ownerToken}` },
+      payload: { email: 'viewer-d@agency.io', role: 'VIEWER' },
+    });
+    expect(invite.statusCode).toBe(201);
+    const inviteToken = invite.json().data.devInviteToken as string;
+    expect(inviteToken).toBeTruthy();
+
+    // Teammate D accepts invite
+    const accept = await app.inject({
+      method: 'POST',
+      url: '/api/v1/workspace/invites/accept',
+      headers: { authorization: `Bearer ${teammateToken}` },
+      payload: { token: inviteToken },
+    });
+    expect(accept.statusCode).toBe(200);
+    const membershipId = accept.json().data.id as string;
+
+    // Teammate D (VIEWER) tries to create a creator in Agency C -> 403 FORBIDDEN!
+    const denied = await app.inject({
+      method: 'POST',
+      url: '/api/v1/creators',
+      headers: {
+        authorization: `Bearer ${teammateToken}`,
+        'x-workspace-id': agencyWsId,
+      },
+      payload: {
+        handle: 'blocked_creator',
+        displayName: 'Blocked',
+        platform: 'TWITCH',
+        channelUrl: 'https://www.twitch.tv/blocked_creator',
+      },
+    });
+    expect(denied.statusCode).toBe(403);
+
+    // Owner promotes Teammate D to MEMBER
+    const promote = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/workspace/members/${membershipId}/role`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+      payload: { role: 'MEMBER' },
+    });
+    expect(promote.statusCode).toBe(200);
+
+    // Teammate D (now MEMBER) creates creator -> 201!
+    const allowed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/creators',
+      headers: {
+        authorization: `Bearer ${teammateToken}`,
+        'x-workspace-id': agencyWsId,
+      },
+      payload: {
+        handle: 'allowed_creator',
+        displayName: 'Allowed',
+        platform: 'TWITCH',
+        channelUrl: 'https://www.twitch.tv/allowed_creator',
+      },
+    });
+    expect(allowed.statusCode).toBe(201);
+
+    // Owner removes member cleanly
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/workspace/members/${membershipId}`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(removed.statusCode).toBe(200);
+  });
+
+  it('12. SSRF HTTP guard (400), Notification prefs persistence, Media URL & Funnel telemetry', async () => {
+    const ssrf = await app.inject({
+      method: 'POST',
+      url: '/api/v1/creators',
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: {
+        handle: 'ssrf_probe',
+        displayName: 'SSRF Probe',
+        platform: 'TWITCH',
+        channelUrl: 'http://169.254.169.254/latest/meta-data/',
+      },
+    });
+    expect(ssrf.statusCode).toBe(400);
+    expect(ssrf.json().errorCode).toBe('SSRF_BLOCKED');
+
+    const saveNotif = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/account/notifications',
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { approvals: true, failures: false, billing: true, security: true },
+    });
+    expect(saveNotif.statusCode).toBe(200);
+
+    const readNotif = await app.inject({
+      method: 'GET',
+      url: '/api/v1/account/notifications',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(readNotif.statusCode).toBe(200);
+    expect(readNotif.json().data.failures).toBe(false);
+
+    const funnel = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/funnel',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(funnel.statusCode).toBe(200);
+    expect(funnel.json().data.length).toBeGreaterThanOrEqual(1);
+  });
 });

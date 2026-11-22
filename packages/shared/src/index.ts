@@ -292,6 +292,27 @@ export const AdminUpdateUserStatusSchema = z.object({
   status: z.enum(['ACTIVE', 'SUSPENDED']),
 });
 
+export const InviteMemberRequestSchema = z.object({
+  email: z.string().trim().email().max(180),
+  role: z.enum(['ADMIN', 'MEMBER', 'VIEWER']).default('MEMBER'),
+});
+
+export const AcceptInviteRequestSchema = z.object({
+  token: z.string().min(8).max(256),
+});
+
+export const UpdateMemberRoleRequestSchema = z.object({
+  role: z.enum(['ADMIN', 'MEMBER', 'VIEWER']),
+});
+
+export const NotificationPreferencesSchema = z.object({
+  approvals: z.boolean().default(true),
+  failures: z.boolean().default(true),
+  billing: z.boolean().default(true),
+  security: z.boolean().default(true),
+});
+export type NotificationPreferences = z.infer<typeof NotificationPreferencesSchema>;
+
 export interface CampaignComplianceResult {
   passed: boolean;
   score: number;

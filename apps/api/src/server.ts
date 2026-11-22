@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { PrismaClient } from '@prisma/client';
 import {
+  AcceptInviteRequestSchema,
   AdminUpdateUserStatusSchema,
   BillingWebhookPayloadSchema,
   ChangePasswordRequestSchema,
@@ -17,11 +18,14 @@ import {
   evaluateClipCompliance,
   ForgotPasswordRequestSchema,
   IngestStreamRequestSchema,
+  InviteMemberRequestSchema,
   LoginRequestSchema,
+  NotificationPreferencesSchema,
   RegisterRequestSchema,
   ResetPasswordRequestSchema,
   SAAS_PLANS,
   ToggleAutoPublishRequestSchema,
+  UpdateMemberRoleRequestSchema,
   UpdateProfileRequestSchema,
   VerifyEmailRequestSchema,
   type PlanTier,
@@ -60,6 +64,7 @@ import {
   createPresignedS3Url,
   getS3StorageConfig,
 } from './integrations/storage.js';
+import { tryFetchYouTubeChannelLatest } from './integrations/scheduler.js';
 
 function slugifyWorkspace(name: string): string {
   const base = name
@@ -80,11 +85,42 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       'X-Api-Key',
       'X-Workspace-Id',
       'x-billing-signature',
+      'stripe-signature',
     ],
   });
 
+  // Preserve exact raw bytes for Stripe webhook HMAC verification while parsing JSON normally
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'buffer' },
+    (req, body: Buffer, done) => {
+      (req as { rawBody?: Buffer }).rawBody = body;
+      if (!body || body.length === 0) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(body.toString('utf8')));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   const authRateLimiter = new SlidingWindowRateLimiter(30, 60_000);
   const isProd = process.env['NODE_ENV'] === 'production';
+
+  async function trackConversion(eventName: string, workspaceId?: string, metadata: unknown = {}) {
+    await prisma.conversionEvent
+      .create({
+        data: {
+          workspaceId: workspaceId ?? null,
+          eventName,
+          metadataJson: JSON.stringify(metadata),
+        },
+      })
+      .catch(() => {});
+  }
 
   app.addHook('onSend', async (_request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
@@ -339,6 +375,7 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       recipientName: result.user.name,
       actionUrl: `${publicAppUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`,
     });
+    await trackConversion('REGISTER_COMPLETED', result.workspace.id);
 
     return reply.status(201).send({
       success: true,
@@ -526,6 +563,13 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
         },
       });
       if (!isProd) devResetToken = rawToken;
+      const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+      void sendTransactionalEmail({
+        to: user.email,
+        kind: 'PASSWORD_RESET',
+        recipientName: user.name,
+        actionUrl: `${publicAppUrl}/reset-password?token=${encodeURIComponent(rawToken)}`,
+      });
     }
     return {
       success: true,
@@ -1457,7 +1501,8 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       typeof request.headers['stripe-signature'] === 'string'
         ? request.headers['stripe-signature']
         : undefined;
-    const rawBody = JSON.stringify(request.body ?? {});
+    const rawBody =
+      (request as { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(request.body ?? {}));
     let event;
     try {
       event = constructVerifiedStripeEvent(rawBody, sig);
@@ -2147,9 +2192,32 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       const bannedKeywords = JSON.parse(creator.bannedKeywordsJson) as string[];
       const tags = JSON.parse(creator.tagsJson) as string[];
       const primaryTopic = requiredTopics[0] ?? 'Live Stream';
-      const externalVideoId = `vid_${creator.handle}_${Date.now().toString(36).slice(-5)}`;
-      const videoTitle = `${creator.displayName} — New ${primaryTopic} Upload (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
-      const videoUrl = `${creator.channelUrl.replace(/\/$/, '')}/videos/${externalVideoId}`;
+
+      const liveAtomVideo =
+        creator.platform === 'YOUTUBE'
+          ? await tryFetchYouTubeChannelLatest(creator.channelUrl)
+          : null;
+      const existingAtom = liveAtomVideo
+        ? await prisma.channelVideo.findUnique({
+            where: {
+              creatorId_externalVideoId: {
+                creatorId: creator.id,
+                externalVideoId: liveAtomVideo.externalVideoId,
+              },
+            },
+          })
+        : null;
+
+      const useAtom = Boolean(liveAtomVideo && !existingAtom);
+      const externalVideoId = useAtom
+        ? liveAtomVideo!.externalVideoId
+        : `vid_${creator.handle}_${Date.now().toString(36).slice(-5)}`;
+      const videoTitle = useAtom
+        ? liveAtomVideo!.title
+        : `${creator.displayName} — New ${primaryTopic} Upload (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+      const videoUrl = useAtom
+        ? liveAtomVideo!.videoUrl
+        : `${creator.channelUrl.replace(/\/$/, '')}/videos/${externalVideoId}`;
 
       const channelVideo = await prisma.channelVideo.create({
         data: {
@@ -2159,9 +2227,13 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
           title: videoTitle,
           videoUrl,
           durationSec: 2400,
-          detectionSource: 'CHANNEL_FEED_SCAN',
+          detectionSource: useAtom ? 'YOUTUBE_ATOM_FEED' : 'CHANNEL_FEED_SCAN',
           detectionStatus: autoExecute ? 'PROCESSING' : 'DETECTED',
         },
+      });
+      await trackConversion('VIDEO_DETECTED', ctx.workspaceId, {
+        platform: creator.platform,
+        source: useAtom ? 'YOUTUBE_ATOM_FEED' : 'CHANNEL_FEED_SCAN',
       });
 
       if (autoExecute) {
@@ -2562,6 +2634,225 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
           emailVerified: Boolean(m.user.emailVerifiedAt),
         },
       })),
+    };
+  });
+
+  app.get('/api/v1/workspace/invites', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
+    if (!ctx) return;
+    const invites = await prisma.workspaceInvite.findMany({
+      where: { workspaceId: ctx.workspaceId, acceptedAt: null },
+      select: { id: true, email: true, role: true, expiresAt: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { success: true, data: invites };
+  });
+
+  app.post('/api/v1/workspace/members/invite', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
+    if (!ctx) return;
+    const parsed = InviteMemberRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: parsed.error.flatten() });
+    }
+    const workspace = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
+    if (!workspace) return reply.status(404).send({ success: false, error: 'Workspace not found' });
+
+    const normalizedEmail = parsed.data.email.toLowerCase();
+    const rawToken = generateOpaqueToken(24);
+    const invite = await prisma.workspaceInvite.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        email: normalizedEmail,
+        role: parsed.data.role,
+        tokenHash: sha256Hex(rawToken),
+        invitedById: ctx.userId,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+    void sendTransactionalEmail({
+      to: normalizedEmail,
+      kind: 'WORKSPACE_INVITE',
+      workspaceName: workspace.name,
+      actionUrl: `${publicAppUrl}/settings/team?invite=${encodeURIComponent(rawToken)}`,
+    });
+
+    await logAudit(
+      'WORKSPACE_MEMBER_INVITED',
+      'WorkspaceInvite',
+      invite.id,
+      { email: normalizedEmail, role: parsed.data.role },
+      ctx.workspaceId,
+      ctx.userId,
+    );
+
+    return reply.status(201).send({
+      success: true,
+      data: {
+        id: invite.id,
+        email: invite.email,
+        role: invite.role,
+        expiresAt: invite.expiresAt,
+        ...(isProd ? {} : { devInviteToken: rawToken }),
+      },
+    });
+  });
+
+  app.post('/api/v1/workspace/invites/accept', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const parsed = AcceptInviteRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: parsed.error.flatten() });
+    }
+
+    const tokenHash = sha256Hex(parsed.data.token);
+    const invite = await prisma.workspaceInvite.findFirst({
+      where: {
+        tokenHash,
+        acceptedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+    });
+    if (!invite) {
+      return reply.status(400).send({
+        success: false,
+        errorCode: 'INVALID_INVITE_TOKEN',
+        error: 'Invitation token is invalid or expired.',
+      });
+    }
+    if (invite.email.toLowerCase() !== ctx.email.toLowerCase()) {
+      return reply.status(403).send({
+        success: false,
+        errorCode: 'INVITE_EMAIL_MISMATCH',
+        error: 'This invitation belongs to a different email address.',
+      });
+    }
+
+    const [membership] = await prisma.$transaction([
+      prisma.workspaceMember.upsert({
+        where: {
+          workspaceId_userId: { workspaceId: invite.workspaceId, userId: ctx.userId },
+        },
+        update: { role: invite.role },
+        create: {
+          workspaceId: invite.workspaceId,
+          userId: ctx.userId,
+          role: invite.role,
+        },
+      }),
+      prisma.workspaceInvite.update({
+        where: { id: invite.id },
+        data: { acceptedAt: new Date() },
+      }),
+    ]);
+
+    await logAudit(
+      'WORKSPACE_INVITE_ACCEPTED',
+      'WorkspaceMember',
+      membership.id,
+      { role: membership.role },
+      invite.workspaceId,
+      ctx.userId,
+    );
+
+    return { success: true, data: membership };
+  });
+
+  app.patch('/api/v1/workspace/members/:memberId/role', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'OWNER');
+    if (!ctx) return;
+    const { memberId } = request.params as { memberId: string };
+    const parsed = UpdateMemberRoleRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: parsed.error.flatten() });
+    }
+    const existing = await prisma.workspaceMember.findFirst({
+      where: { id: memberId, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) return reply.status(404).send({ success: false, error: 'Member not found' });
+    if (existing.role === 'OWNER') {
+      return reply.status(400).send({ success: false, error: 'Cannot modify OWNER role directly.' });
+    }
+    const updated = await prisma.workspaceMember.update({
+      where: { id: existing.id },
+      data: { role: parsed.data.role },
+    });
+    await logAudit(
+      'WORKSPACE_MEMBER_ROLE_UPDATED',
+      'WorkspaceMember',
+      updated.id,
+      { role: updated.role },
+      ctx.workspaceId,
+      ctx.userId,
+    );
+    return { success: true, data: updated };
+  });
+
+  app.delete('/api/v1/workspace/members/:memberId', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
+    if (!ctx) return;
+    const { memberId } = request.params as { memberId: string };
+    const existing = await prisma.workspaceMember.findFirst({
+      where: { id: memberId, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) return reply.status(404).send({ success: false, error: 'Member not found' });
+    if (existing.role === 'OWNER') {
+      return reply.status(400).send({ success: false, error: 'Cannot remove workspace OWNER.' });
+    }
+    await prisma.workspaceMember.delete({ where: { id: existing.id } });
+    await logAudit(
+      'WORKSPACE_MEMBER_REMOVED',
+      'WorkspaceMember',
+      existing.id,
+      { removedUserId: existing.userId },
+      ctx.workspaceId,
+      ctx.userId,
+    );
+    return { success: true };
+  });
+
+  app.get('/api/v1/account/notifications', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const user = await prisma.user.findUnique({ where: { id: ctx.userId } });
+    const parsed = NotificationPreferencesSchema.safeParse(
+      user?.notificationPrefsJson ? JSON.parse(user.notificationPrefsJson) : {},
+    );
+    return {
+      success: true,
+      data: parsed.success
+        ? parsed.data
+        : { approvals: true, failures: true, billing: true, security: true },
+    };
+  });
+
+  app.patch('/api/v1/account/notifications', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const parsed = NotificationPreferencesSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: parsed.error.flatten() });
+    }
+    await prisma.user.update({
+      where: { id: ctx.userId },
+      data: { notificationPrefsJson: JSON.stringify(parsed.data) },
+    });
+    return { success: true, data: parsed.data };
+  });
+
+  app.get('/api/v1/admin/funnel', async (request, reply) => {
+    const ctx = await requireSuperAdmin(prisma, request, reply);
+    if (!ctx) return;
+    const events = await prisma.conversionEvent.groupBy({
+      by: ['eventName'],
+      _count: { eventName: true },
+    });
+    return {
+      success: true,
+      data: events.map((e) => ({ eventName: e.eventName, count: e._count.eventName })),
     };
   });
 

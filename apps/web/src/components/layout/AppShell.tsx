@@ -165,6 +165,14 @@ export function AppShell({
             <div className="h-1 w-full overflow-hidden rounded-full bg-secondary">
               <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
             </div>
+            {pct >= 80 && workspace.planTier !== 'ENTERPRISE' && (
+              <Link
+                href="/settings/billing"
+                className="block pt-1 text-[11px] font-medium text-primary hover:underline"
+              >
+                Approaching limit — Upgrade plan →
+              </Link>
+            )}
           </div>
         </div>
 

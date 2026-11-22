@@ -1,6 +1,7 @@
 export type EmailTemplateKind =
   | 'VERIFY_EMAIL'
   | 'PASSWORD_RESET'
+  | 'WORKSPACE_INVITE'
   | 'SUBSCRIPTION_ACTIVATED'
   | 'PAYMENT_FAILED'
   | 'SUBSCRIPTION_CANCELLED';
@@ -70,6 +71,17 @@ export function renderBrandedEmail(
           params.actionUrl,
         ),
         text: `Hi ${name},\n\nReset your Clip Network password (expires in 60 minutes): ${params.actionUrl ?? ''}\n`,
+      };
+    case 'WORKSPACE_INVITE':
+      return {
+        subject: `You have been invited to ${params.workspaceName ?? 'a Clip Network workspace'}`,
+        html: wrapHtml(
+          `Join ${params.workspaceName ?? 'Clip Network'}`,
+          `<p>Hi ${name},</p><p>You have been invited to collaborate on <strong>${params.workspaceName ?? 'a Clip Network workspace'}</strong>. Accept your invitation below to access creators, clips, and distribution workflows.</p>`,
+          'Accept Invitation',
+          params.actionUrl,
+        ),
+        text: `You were invited to join ${params.workspaceName ?? 'Clip Network'}: ${params.actionUrl ?? ''}\n`,
       };
     case 'SUBSCRIPTION_ACTIVATED':
       return {
