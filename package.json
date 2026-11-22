@@ -1,0 +1,21 @@
+{
+  "name": "clip-network",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Autonomous Stream-to-Clip Network: tag creator accounts, link social clipping accounts, extract voice-synced viral shorts with procedural SFX, and route to linked accounts.",
+  "scripts": {
+    "dev:api": "pnpm --filter @clip-network/api dev",
+    "dev:web": "pnpm --filter @clip-network/web dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "db:push": "pnpm --filter @clip-network/api exec prisma db push",
+    "db:generate": "pnpm --filter @clip-network/api exec prisma generate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

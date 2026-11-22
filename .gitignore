@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.env
+.env.local
+*.db
+*.db-journal
+data/
+renders/
+*.mp4
+*.wav
+*.mp3
+*.png

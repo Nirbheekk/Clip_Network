@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model CreatorAccount {
+  id                  String   @id @default(uuid())
+  handle              String   @unique
+  displayName         String
+  platform            String   // TWITCH, YOUTUBE, KICK
+  channelUrl          String
+  tagsJson            String   @default("[]")
+  requiredTopicsJson  String   @default("[]")
+  bannedKeywordsJson  String   @default("[]")
+  disallowLogos       Boolean  @default(true)
+  defaultLayout       String   @default("SPLIT_FACECAM_BOTTOM")
+  defaultCaptionStyle String   @default("HIGH_ENERGY")
+  enableSfx           Boolean  @default(true)
+  facecamCropJson     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  routes CreatorRouteRule[]
+  clips  ClipJob[]
+}
+
+model SocialAccount {
+  id                  String   @id @default(uuid())
+  platform            String   // INSTAGRAM_REELS, TIKTOK, YOUTUBE_SHORTS, X
+  accountName         String
+  accountHandle       String
+  encryptedToken      String?
+  autoPublishApproved Boolean  @default(false) // Human approval gate by default!
+  timezone            String   @default("UTC")
+  integrationMode     String   @default("SANDBOX_SIMULATED") // SANDBOX_SIMULATED or LIVE_OAUTH
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  routes       CreatorRouteRule[]
+  publishPosts PublishPost[]
+
+  @@unique([platform, accountHandle])
+}
+
+model CreatorRouteRule {
+  id                 String   @id @default(uuid())
+  creatorId          String
+  socialAccountId    String
+  minComplianceScore Int      @default(75)
+  captionTemplate    String   @default("{hook} {tags}")
+  hashtagsJson       String   @default("[]")
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  creator       CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount  @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorId, socialAccountId])
+}
+
+model ClipJob {
+  id                   String    @id @default(uuid())
+  creatorId            String
+  sourceUrl            String
+  title                String
+  startSec             Float
+  endSec               Float
+  durationSec          Float
+  transcript           String
+  layout               String
+  captionStyle         String
+  enableSfx            Boolean   @default(true)
+  sfxCuesJson          String    @default("[]")
+  assScript            String
+  outputMp4Path        String?
+  compliancePassed     Boolean
+  complianceScore      Int
+  complianceReportJson String
+  approvalStatus       String    @default("AWAITING_APPROVAL") // AWAITING_APPROVAL, APPROVED, REJECTED, DISQUALIFIED
+  approvedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  creator      CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  publishPosts PublishPost[]
+}
+
+model PublishPost {
+  id              String    @id @default(uuid())
+  clipJobId       String
+  socialAccountId String
+  idempotencyKey  String    @unique
+  platform        String
+  captionText     String
+  status          String    @default("AWAITING_APPROVAL") // AWAITING_APPROVAL, SCHEDULED, PUBLISHED_SANDBOX, PUBLISHED_LIVE, FAILED, BLOCKED
+  executionMode   String    @default("SANDBOX_SIMULATED")
+  externalPostId  String?
+  errorMessage    String?
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  clipJob       ClipJob       @relation(fields: [clipJobId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     String
+  entityType String
+  entityId   String
+  details    String
+  createdAt  DateTime @default(now())
+}
