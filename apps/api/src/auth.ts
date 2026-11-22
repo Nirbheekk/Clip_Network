@@ -258,3 +258,42 @@ export async function requireSuperAdmin(
   }
   return ctx;
 }
+
+const BLOCKED_SSRF_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '0.0.0.0',
+  '::1',
+  '[::1]',
+  '169.254.169.254',
+  'metadata.google.internal',
+]);
+
+/**
+ * SSRF Guard: Ensures user-supplied creator channel or stream URLs use public HTTP(S) origins only.
+ */
+export function assertSafeExternalUrl(rawUrl: string): { safe: boolean; reason?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { safe: false, reason: 'Invalid URL format.' };
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return { safe: false, reason: 'Only http:// and https:// URLs are permitted.' };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    BLOCKED_SSRF_HOSTS.has(host) ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    /^10\./.test(host) ||
+    /^127\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+    /^169\.254\./.test(host)
+  ) {
+    return { safe: false, reason: 'Private, loopback, or metadata network URLs are forbidden.' };
+  }
+  return { safe: true };
+}

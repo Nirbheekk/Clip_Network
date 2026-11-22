@@ -70,6 +70,7 @@ export function BillingView({
       billingMode: string;
       plan: PlanDef;
       message: string;
+      checkoutUrl?: string;
       sandboxWebhookPayload?: Record<string, unknown>;
       sandboxWebhookSignature?: string;
     }>('/api/v1/billing/checkout', {
@@ -79,6 +80,10 @@ export function BillingView({
     });
     setBusy(false);
     if (res.ok && res.json.data) {
+      if (res.json.data.checkoutUrl) {
+        window.location.href = res.json.data.checkoutUrl;
+        return;
+      }
       onNotify(res.json.data.message);
       if (res.json.data.sandboxWebhookPayload && res.json.data.sandboxWebhookSignature) {
         setPendingWebhook({
@@ -87,6 +92,20 @@ export function BillingView({
           signature: res.json.data.sandboxWebhookSignature,
         });
       }
+    }
+  }
+
+  async function openBillingPortal() {
+    setBusy(true);
+    const res = await apiRequest<{ portalUrl: string }>('/api/v1/billing/portal', {
+      method: 'POST',
+      token,
+    });
+    setBusy(false);
+    if (res.ok && res.json.data?.portalUrl) {
+      window.location.href = res.json.data.portalUrl;
+    } else {
+      onNotify('Stripe Billing Portal activates automatically once STRIPE_LIVE is configured.');
     }
   }
 
@@ -139,6 +158,11 @@ export function BillingView({
           </div>
           <div className="flex items-center gap-2">
             <Badge>{workspace.planTier} PLAN</Badge>
+            {workspace.billingProviderMode === 'STRIPE_LIVE' && (
+              <Button variant="outline" size="sm" onClick={openBillingPortal} disabled={busy}>
+                Billing Portal
+              </Button>
+            )}
             {workspace.planTier !== 'FREE' && (
               <Button variant="outline" size="sm" onClick={cancelSubscription} disabled={busy}>
                 Cancel Plan

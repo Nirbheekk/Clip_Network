@@ -34,6 +34,7 @@ import {
   SFX_PRESETS,
 } from '@clip-network/clip-engine';
 import {
+  assertSafeExternalUrl,
   computeWebhookSignature,
   generateOpaqueToken,
   hashPassword,
@@ -44,6 +45,21 @@ import {
   verifyPassword,
   verifyWebhookSignature,
 } from './auth.js';
+import {
+  cancelStripeSubscriptionIfActive,
+  constructVerifiedStripeEvent,
+  createStripeBillingPortalSession,
+  createStripeCheckoutSession,
+  isStripeLiveConfigured,
+  resolvePlanTierFromPriceId,
+} from './integrations/stripe.js';
+import { isLiveEmailConfigured, sendTransactionalEmail } from './integrations/email.js';
+import { dispatchSocialPublish } from './integrations/publishing.js';
+import {
+  buildTenantClipObjectKey,
+  createPresignedS3Url,
+  getS3StorageConfig,
+} from './integrations/storage.js';
 
 function slugifyWorkspace(name: string): string {
   const base = name
@@ -118,11 +134,31 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       return post; // Idempotent replay
     }
 
-    const postizKey = process.env['POSTIZ_API_KEY']?.trim();
-    const isLive = Boolean(postizKey && postizKey.length > 8 && post.socialAccount.encryptedToken);
-    const nextStatus = isLive ? 'PUBLISHED_LIVE' : 'PUBLISHED_SANDBOX';
-    const executionMode = isLive ? 'LIVE_OAUTH' : 'SANDBOX_SIMULATED';
-    const externalPostId = `${isLive ? 'live' : 'sandbox'}-${post.platform.toLowerCase()}-${randomUUID().slice(0, 8)}`;
+    const dispatch = await dispatchSocialPublish({
+      platform: post.platform,
+      accountHandle: post.socialAccount.accountHandle,
+      encryptedToken: post.socialAccount.encryptedToken,
+      captionText: post.captionText,
+      idempotencyKey: post.idempotencyKey,
+      mediaUrl: post.clipJob.outputMp4Path,
+      durationSec: post.clipJob.durationSec,
+    });
+
+    if (!dispatch.success) {
+      return prisma.publishPost.update({
+        where: { id: post.id },
+        data: {
+          status: 'FAILED',
+          executionMode: dispatch.executionMode,
+          errorMessage: dispatch.errorMessage ?? 'Publishing failed.',
+        },
+      });
+    }
+
+    const isLive = dispatch.status === 'PUBLISHED_LIVE';
+    const nextStatus = dispatch.status;
+    const executionMode = dispatch.executionMode;
+    const externalPostId = dispatch.externalPostId ?? `sandbox-${randomUUID().slice(0, 8)}`;
 
     const updated = await prisma.publishPost.update({
       where: { id: post.id },
@@ -181,10 +217,12 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     return {
       success: true,
       service: '@clip-network/api',
-      version: '2.0.0-saas',
+      version: '2.1.0-commercial',
       database: 'connected',
-      billingMode: process.env['STRIPE_SECRET_KEY']?.trim() ? 'STRIPE_LIVE' : 'SANDBOX_WEBHOOK',
+      billingMode: isStripeLiveConfigured() ? 'STRIPE_LIVE' : 'SANDBOX_WEBHOOK',
       publishingMode: process.env['POSTIZ_API_KEY']?.trim() ? 'LIVE_OAUTH' : 'SANDBOX_SIMULATED',
+      emailMode: isLiveEmailConfigured() ? 'RESEND_LIVE' : 'SANDBOX_LOG',
+      storageMode: getS3StorageConfig() ? 'S3_LIVE' : 'LOCAL_SANDBOX',
       sfxPresets: Object.values(SFX_PRESETS).map((p) => p.id),
     };
   });
@@ -293,6 +331,14 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       result.workspace.id,
       result.user.id,
     );
+
+    const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+    void sendTransactionalEmail({
+      to: result.user.email,
+      kind: 'VERIFY_EMAIL',
+      recipientName: result.user.name,
+      actionUrl: `${publicAppUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`,
+    });
 
     return reply.status(201).send({
       success: true,
@@ -708,6 +754,14 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     }
 
     const d = parsed.data;
+    const urlCheck = assertSafeExternalUrl(d.channelUrl);
+    if (!urlCheck.safe) {
+      return reply.status(400).send({
+        success: false,
+        errorCode: 'SSRF_BLOCKED',
+        error: urlCheck.reason,
+      });
+    }
     const created = await prisma.creatorAccount.create({
       data: {
         workspaceId: ctx.workspaceId,
@@ -967,6 +1021,14 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     }
 
     const d = parsed.data;
+    const urlCheck = assertSafeExternalUrl(d.sourceUrl);
+    if (!urlCheck.safe) {
+      return reply.status(400).send({
+        success: false,
+        errorCode: 'SSRF_BLOCKED',
+        error: urlCheck.reason,
+      });
+    }
     const creator = await prisma.creatorAccount.findFirst({
       where: { id: d.creatorId, workspaceId: ctx.workspaceId },
       include: { routes: { where: { enabled: true }, include: { socialAccount: true } } },
@@ -1284,7 +1346,54 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       return reply.status(400).send({ success: false, error: parsed.error.flatten() });
     }
     const targetPlan = SAAS_PLANS[parsed.data.planTier];
-    const hasLiveStripe = Boolean(process.env['STRIPE_SECRET_KEY']?.trim());
+    const hasLiveStripe = isStripeLiveConfigured();
+    const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+
+    if (hasLiveStripe && targetPlan.id !== 'FREE') {
+      const workspace = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
+      if (!workspace) {
+        return reply.status(404).send({ success: false, error: 'Workspace not found' });
+      }
+      const liveSession = await createStripeCheckoutSession({
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        customerEmail: ctx.email,
+        existingCustomerId: workspace.stripeCustomerId,
+        planTier: targetPlan.id,
+        publicAppUrl,
+      });
+      if (!liveSession) {
+        return reply.status(503).send({
+          success: false,
+          errorCode: 'STRIPE_PRICE_NOT_CONFIGURED',
+          error: `STRIPE_PRICE_${targetPlan.id} is not configured on the server.`,
+        });
+      }
+      if (!workspace.stripeCustomerId) {
+        await prisma.workspace.update({
+          where: { id: workspace.id },
+          data: { stripeCustomerId: liveSession.customerId },
+        });
+      }
+      await logAudit(
+        'BILLING_CHECKOUT_INITIATED',
+        'Workspace',
+        ctx.workspaceId,
+        { targetPlan: targetPlan.id, billingMode: 'STRIPE_LIVE', sessionId: liveSession.sessionId },
+        ctx.workspaceId,
+        ctx.userId,
+      );
+      return {
+        success: true,
+        data: {
+          billingMode: 'STRIPE_LIVE',
+          plan: targetPlan,
+          checkoutUrl: liveSession.checkoutUrl,
+          sessionId: liveSession.sessionId,
+          message: 'Redirecting to Stripe Checkout.',
+        },
+      };
+    }
 
     // Build a deterministic webhook payload for sandbox testing (never mutates plan directly without signed webhook!)
     const webhookPayload = {
@@ -1302,7 +1411,7 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
       'BILLING_CHECKOUT_INITIATED',
       'Workspace',
       ctx.workspaceId,
-      { targetPlan: targetPlan.id, billingMode: hasLiveStripe ? 'STRIPE_LIVE' : 'SANDBOX_WEBHOOK' },
+      { targetPlan: targetPlan.id, billingMode: 'SANDBOX_WEBHOOK' },
       ctx.workspaceId,
       ctx.userId,
     );
@@ -1310,16 +1419,134 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     return {
       success: true,
       data: {
-        billingMode: hasLiveStripe ? 'STRIPE_LIVE' : 'SANDBOX_WEBHOOK',
+        billingMode: 'SANDBOX_WEBHOOK',
         plan: targetPlan,
-        message: hasLiveStripe
-          ? 'Stripe Checkout session ready.'
-          : 'Sandbox billing mode active. Plan activates only after server-verified HMAC webhook confirmation.',
+        message:
+          'Sandbox billing mode active. Plan activates only after server-verified HMAC webhook confirmation.',
         ...(!isProd && !hasLiveStripe
           ? { sandboxWebhookPayload: webhookPayload, sandboxWebhookSignature: devSignature }
           : {}),
       },
     };
+  });
+
+  app.post('/api/v1/billing/portal', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
+    if (!ctx) return;
+    const workspace = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
+    if (!workspace?.stripeCustomerId || !isStripeLiveConfigured()) {
+      return reply.status(400).send({
+        success: false,
+        errorCode: 'BILLING_PORTAL_UNAVAILABLE',
+        error: 'Stripe Billing Portal requires an active STRIPE_LIVE customer subscription.',
+      });
+    }
+    const publicAppUrl = process.env['PUBLIC_APP_URL']?.trim() || 'http://localhost:3100';
+    const portal = await createStripeBillingPortalSession({
+      customerId: workspace.stripeCustomerId,
+      publicAppUrl,
+    });
+    if (!portal) {
+      return reply.status(503).send({ success: false, error: 'Unable to open Stripe Billing Portal.' });
+    }
+    return { success: true, data: portal };
+  });
+
+  app.post('/api/v1/billing/webhook/stripe', async (request, reply) => {
+    const sig =
+      typeof request.headers['stripe-signature'] === 'string'
+        ? request.headers['stripe-signature']
+        : undefined;
+    const rawBody = JSON.stringify(request.body ?? {});
+    let event;
+    try {
+      event = constructVerifiedStripeEvent(rawBody, sig);
+    } catch {
+      return reply.status(401).send({
+        success: false,
+        errorCode: 'INVALID_STRIPE_SIGNATURE',
+        error: 'Stripe webhook signature verification failed.',
+      });
+    }
+    if (!event) {
+      return reply.status(503).send({
+        success: false,
+        errorCode: 'STRIPE_NOT_CONFIGURED',
+        error: 'Stripe live webhook credentials are not configured.',
+      });
+    }
+
+    const existing = await prisma.subscriptionInvoice.findUnique({
+      where: { externalEventId: event.id },
+    });
+    if (existing) return { success: true, data: { deduplicated: true } };
+
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const workspaceId = session.metadata?.['workspaceId'];
+      const planTier = (session.metadata?.['planTier'] as PlanTier | undefined) ?? 'STARTER';
+      if (workspaceId && SAAS_PLANS[planTier]) {
+        const planDef = SAAS_PLANS[planTier];
+        await prisma.$transaction([
+          prisma.workspace.update({
+            where: { id: workspaceId },
+            data: {
+              planTier: planDef.id,
+              monthlyClipLimit: planDef.monthlyClipLimit,
+              subscriptionStatus: 'ACTIVE',
+              billingProviderMode: 'STRIPE_LIVE',
+              ...(typeof session.customer === 'string'
+                ? { stripeCustomerId: session.customer }
+                : {}),
+              ...(typeof session.subscription === 'string'
+                ? { stripeSubscriptionId: session.subscription }
+                : {}),
+            },
+          }),
+          prisma.subscriptionInvoice.create({
+            data: {
+              workspaceId,
+              externalEventId: event.id,
+              planTier: planDef.id,
+              amountCents: session.amount_total ?? planDef.priceMonthlyUsd * 100,
+              status: 'PAID',
+              providerMode: 'STRIPE_LIVE',
+            },
+          }),
+        ]);
+      }
+    } else if (event.type === 'customer.subscription.updated') {
+      const sub = event.data.object;
+      const workspaceId = sub.metadata?.['workspaceId'];
+      const priceId = sub.items.data[0]?.price?.id;
+      const nextTier = resolvePlanTierFromPriceId(priceId);
+      if (workspaceId && nextTier) {
+        const planDef = SAAS_PLANS[nextTier];
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: {
+            planTier: planDef.id,
+            monthlyClipLimit: planDef.monthlyClipLimit,
+            subscriptionStatus: sub.status === 'active' ? 'ACTIVE' : 'PAST_DUE',
+          },
+        });
+      }
+    } else if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object;
+      const workspaceId = sub.metadata?.['workspaceId'];
+      if (workspaceId) {
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: {
+            planTier: 'FREE',
+            monthlyClipLimit: SAAS_PLANS.FREE.monthlyClipLimit,
+            subscriptionStatus: 'CANCELLED',
+          },
+        });
+      }
+    }
+
+    return { success: true, data: { eventId: event.id, type: event.type } };
   });
 
   app.post('/api/v1/billing/webhook', async (request, reply) => {
@@ -1425,6 +1652,10 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
   app.post('/api/v1/billing/cancel', async (request, reply) => {
     const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
     if (!ctx) return;
+    const currentWs = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });
+    if (currentWs?.stripeSubscriptionId) {
+      await cancelStripeSubscriptionIfActive(currentWs.stripeSubscriptionId).catch(() => {});
+    }
     const freePlan = SAAS_PLANS.FREE;
     const updated = await prisma.workspace.update({
       where: { id: ctx.workspaceId },
@@ -1432,10 +1663,46 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
         planTier: freePlan.id,
         monthlyClipLimit: freePlan.monthlyClipLimit,
         subscriptionStatus: 'CANCELLED',
+        stripeSubscriptionId: null,
       },
     });
     await logAudit('SUBSCRIPTION_CANCELLED', 'Workspace', ctx.workspaceId, {}, ctx.workspaceId, ctx.userId);
     return { success: true, data: updated };
+  });
+
+  app.get('/api/v1/clips/:clipId/media-url', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const { clipId } = request.params as { clipId: string };
+    const clip = await prisma.clipJob.findFirst({
+      where: { id: clipId, workspaceId: ctx.workspaceId },
+    });
+    if (!clip) return reply.status(404).send({ success: false, error: 'Clip not found' });
+
+    const s3 = getS3StorageConfig();
+    const objectKey = buildTenantClipObjectKey(ctx.workspaceId, clip.id, 'mp4');
+    if (!s3) {
+      return {
+        success: true,
+        data: {
+          storageMode: 'LOCAL_SANDBOX',
+          objectKey,
+          signedUrl: null,
+          message: 'S3 storage env vars are not configured; media remains in local sandbox mode.',
+        },
+      };
+    }
+
+    const signedUrl = createPresignedS3Url({
+      config: s3,
+      method: 'GET',
+      objectKey,
+      expiresSec: 900,
+    });
+    return {
+      success: true,
+      data: { storageMode: 'S3_LIVE', objectKey, signedUrl, expiresSec: 900 },
+    };
   });
 
   // ============================================================================
