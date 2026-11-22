@@ -378,6 +378,37 @@ describe('Clip Network Commercial SaaS — End-to-End Integration Suite', () => 
     });
     expect(unblocked.statusCode).toBe(201);
 
+    // Automated Channel Monitor -> Auto-Clip -> Auto-Publish -> Metrics Sync -> Insights
+    const scan = await app.inject({
+      method: 'POST',
+      url: '/api/v1/monitor/scan',
+      headers: { authorization: `Bearer ${tenantAToken}` },
+      payload: { autoExecute: true },
+    });
+    expect(scan.statusCode).toBe(200);
+    expect(scan.json().data.creatorsScanned).toBe(1);
+    expect(scan.json().data.clipsCreated).toBe(1);
+    expect(scan.json().data.postsRouted).toBe(2);
+
+    const sync = await app.inject({
+      method: 'POST',
+      url: '/api/v1/analytics/sync-metrics',
+      headers: { authorization: `Bearer ${tenantAToken}` },
+    });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().data.syncedCount).toBeGreaterThanOrEqual(1);
+
+    const analytics = await app.inject({
+      method: 'GET',
+      url: '/api/v1/analytics',
+      headers: { authorization: `Bearer ${tenantAToken}` },
+    });
+    expect(analytics.statusCode).toBe(200);
+    expect(analytics.json().data.totals.detectedVideosCount).toBeGreaterThanOrEqual(1);
+    expect(analytics.json().data.totals.totalViews).toBeGreaterThan(0);
+    expect(analytics.json().data.platformBreakdown.length).toBeGreaterThanOrEqual(1);
+    expect(analytics.json().data.insights.length).toBeGreaterThanOrEqual(1);
+
     // Cancel subscription downgrades cleanly to FREE
     const cancelSub = await app.inject({
       method: 'POST',

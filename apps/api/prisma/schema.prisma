@@ -64,16 +64,18 @@ model Workspace {
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  members        WorkspaceMember[]
-  apiKeys        ApiKey[]
-  invoices       SubscriptionInvoice[]
-  supportTickets SupportTicket[]
-  creators       CreatorAccount[]
-  socialAccounts SocialAccount[]
-  routes         CreatorRouteRule[]
-  clips          ClipJob[]
-  publishPosts   PublishPost[]
-  auditLogs      AuditLog[]
+  members         WorkspaceMember[]
+  apiKeys         ApiKey[]
+  invoices        SubscriptionInvoice[]
+  supportTickets  SupportTicket[]
+  creators        CreatorAccount[]
+  socialAccounts  SocialAccount[]
+  routes          CreatorRouteRule[]
+  clips           ClipJob[]
+  publishPosts    PublishPost[]
+  channelVideos   ChannelVideo[]
+  metricSnapshots PostMetricSnapshot[]
+  auditLogs       AuditLog[]
 }
 
 model WorkspaceMember {
@@ -145,26 +147,29 @@ model SupportTicket {
 // ============================================================================
 
 model CreatorAccount {
-  id                  String   @id @default(uuid())
+  id                  String    @id @default(uuid())
   workspaceId         String
   handle              String
   displayName         String
-  platform            String   // TWITCH, YOUTUBE, KICK
+  platform            String    // TWITCH, YOUTUBE, KICK
   channelUrl          String
-  tagsJson            String   @default("[]")
-  requiredTopicsJson  String   @default("[]")
-  bannedKeywordsJson  String   @default("[]")
-  disallowLogos       Boolean  @default(true)
-  defaultLayout       String   @default("SPLIT_FACECAM_BOTTOM")
-  defaultCaptionStyle String   @default("HIGH_ENERGY")
-  enableSfx           Boolean  @default(true)
+  autoMonitorEnabled  Boolean   @default(true)
+  lastPolledAt        DateTime?
+  tagsJson            String    @default("[]")
+  requiredTopicsJson  String    @default("[]")
+  bannedKeywordsJson  String    @default("[]")
+  disallowLogos       Boolean   @default(true)
+  defaultLayout       String    @default("SPLIT_FACECAM_BOTTOM")
+  defaultCaptionStyle String    @default("HIGH_ENERGY")
+  enableSfx           Boolean   @default(true)
   facecamCropJson     String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  routes    CreatorRouteRule[]
-  clips     ClipJob[]
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  routes        CreatorRouteRule[]
+  clips         ClipJob[]
+  channelVideos ChannelVideo[]
 
   @@unique([workspaceId, handle])
   @@index([workspaceId])
@@ -262,11 +267,54 @@ model PublishPost {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  clipJob       ClipJob       @relation(fields: [clipJobId], references: [id], onDelete: Cascade)
-  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  clipJob         ClipJob              @relation(fields: [clipJobId], references: [id], onDelete: Cascade)
+  socialAccount   SocialAccount        @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  metricSnapshots PostMetricSnapshot[]
 
   @@index([workspaceId])
+}
+
+model ChannelVideo {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  creatorId       String
+  externalVideoId String
+  title           String
+  videoUrl        String
+  durationSec     Float    @default(1800)
+  detectionSource String   @default("CHANNEL_FEED_SCAN") // YOUTUBE_ATOM_FEED, CHANNEL_FEED_SCAN
+  detectionStatus String   @default("DETECTED") // DETECTED, PROCESSING, CLIPPED, SKIPPED
+  clipJobId       String?
+  publishedAt     DateTime @default(now())
+  detectedAt      DateTime @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator   CreatorAccount @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorId, externalVideoId])
+  @@index([workspaceId])
+  @@index([creatorId])
+}
+
+model PostMetricSnapshot {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  publishPostId     String
+  views             Int      @default(0)
+  likes             Int      @default(0)
+  comments          Int      @default(0)
+  shares            Int      @default(0)
+  watchTimeAvgSec   Float    @default(0)
+  completionRatePct Float    @default(0)
+  sourceMode        String   @default("SANDBOX_SIMULATED") // SANDBOX_SIMULATED, LIVE_PLATFORM_API
+  capturedAt        DateTime @default(now())
+
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  publishPost PublishPost @relation(fields: [publishPostId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([publishPostId])
 }
 
 model AuditLog {

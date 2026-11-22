@@ -2,10 +2,11 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, CheckCircle2, Clapperboard, Rocket } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Clapperboard, Radio, Rocket } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { apiRequest } from '@/lib/saas-types';
 
@@ -17,15 +18,19 @@ export default function OnboardingPage() {
   const [workflowRole, setWorkflowRole] = useState('Solo clipper');
   const [primaryPlatform, setPrimaryPlatform] = useState<'TWITCH' | 'YOUTUBE' | 'KICK'>('TWITCH');
 
-  // Optional first creator
+  // Step 3: Creator channel
   const [creatorHandle, setCreatorHandle] = useState('');
   const [creatorName, setCreatorName] = useState('');
   const [creatorTopics, setCreatorTopics] = useState('GTA, marathon');
+  const [createdCreatorId, setCreatedCreatorId] = useState<string | null>(null);
 
-  // Optional first social account
+  // Step 4: Posting account
   const [socialHandle, setSocialHandle] = useState('');
   const [socialPlatform, setSocialPlatform] = useState<'INSTAGRAM_REELS' | 'TIKTOK' | 'YOUTUBE_SHORTS' | 'X'>('INSTAGRAM_REELS');
+  const [autoPublish, setAutoPublish] = useState(true);
+  const [createdSocialId, setCreatedSocialId] = useState<string | null>(null);
 
+  const [runInitialScan, setRunInitialScan] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -41,14 +46,19 @@ export default function OnboardingPage() {
       return;
     }
     setBusy(true);
-    const res = await apiRequest('/api/v1/creators', {
+    const res = await apiRequest<{ id: string }>('/api/v1/creators', {
       method: 'POST',
       token,
       body: {
         handle: creatorHandle.trim(),
         displayName: creatorName.trim(),
         platform: primaryPlatform,
-        channelUrl: `https://www.twitch.tv/${creatorHandle.trim()}`,
+        channelUrl:
+          primaryPlatform === 'YOUTUBE'
+            ? `https://www.youtube.com/@${creatorHandle.trim()}`
+            : primaryPlatform === 'KICK'
+              ? `https://kick.com/${creatorHandle.trim()}`
+              : `https://www.twitch.tv/${creatorHandle.trim()}`,
         tags: [creatorHandle.trim()],
         requiredTopics: creatorTopics.split(',').map((s) => s.trim()).filter(Boolean),
         bannedKeywords: [],
@@ -57,7 +67,10 @@ export default function OnboardingPage() {
       },
     });
     setBusy(false);
-    if (res.ok) notify(`Creator ${creatorName} tagged.`, 'success');
+    if (res.ok && res.json.data) {
+      setCreatedCreatorId(res.json.data.id);
+      notify(`Creator ${creatorName} added with auto-upload monitoring enabled.`, 'success');
+    }
     setStep(4);
   }
 
@@ -67,18 +80,38 @@ export default function OnboardingPage() {
       return;
     }
     setBusy(true);
-    const res = await apiRequest('/api/v1/social-accounts', {
+    const cleanHandle = socialHandle.trim().startsWith('@')
+      ? socialHandle.trim()
+      : `@${socialHandle.trim()}`;
+    const res = await apiRequest<{ id: string }>('/api/v1/social-accounts', {
       method: 'POST',
       token,
       body: {
         platform: socialPlatform,
-        accountName: socialHandle.trim(),
-        accountHandle: socialHandle.trim().startsWith('@') ? socialHandle.trim() : `@${socialHandle.trim()}`,
-        autoPublishApproved: false,
+        accountName: cleanHandle,
+        accountHandle: cleanHandle,
+        autoPublishApproved: autoPublish,
       },
     });
+    if (res.ok && res.json.data) {
+      const socialId = res.json.data.id;
+      setCreatedSocialId(socialId);
+      // Automatically link Creator -> Posting Account route!
+      if (createdCreatorId) {
+        await apiRequest('/api/v1/routes', {
+          method: 'POST',
+          token,
+          body: {
+            creatorId: createdCreatorId,
+            socialAccountId: socialId,
+            minComplianceScore: 70,
+            hashtags: ['clips', 'shorts'],
+          },
+        });
+      }
+      notify(`Posting account ${cleanHandle} linked & routed.`, 'success');
+    }
     setBusy(false);
-    if (res.ok) notify(`Social account ${socialHandle} linked.`, 'success');
     setStep(5);
   }
 
@@ -99,12 +132,20 @@ export default function OnboardingPage() {
         selectedPlan: 'FREE',
       },
     });
-    setBusy(false);
+
     if (res.ok) {
+      if (runInitialScan && createdCreatorId) {
+        await apiRequest('/api/v1/monitor/scan', {
+          method: 'POST',
+          token,
+          body: { autoExecute: true },
+        });
+      }
       await refreshSession();
-      notify('Workspace ready. Welcome to Clip Network.', 'success');
+      notify('Workspace live. Channel monitor detected latest video & executed pipeline.', 'success');
       router.push('/dashboard');
     }
+    setBusy(false);
   }
 
   return (
@@ -131,7 +172,7 @@ export default function OnboardingPage() {
             <div>
               <h1 className="font-display text-xl font-semibold">Welcome, {user.name}</h1>
               <p className="text-xs text-muted-foreground mt-1">
-                Confirm your workspace name and primary stream source platform.
+                Name your workspace and choose the primary creator platform you monitor.
               </p>
             </div>
             <div className="space-y-1.5">
@@ -167,7 +208,7 @@ export default function OnboardingPage() {
             <div>
               <h2 className="font-display text-xl font-semibold">How will you use Clip Network?</h2>
               <p className="text-xs text-muted-foreground mt-1">
-                Helps tailor your workspace checklist. You can change workflows anytime.
+                Configure your channel monitoring and publishing workflow.
               </p>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
@@ -194,14 +235,14 @@ export default function OnboardingPage() {
         {step === 3 && (
           <div className="space-y-4">
             <div>
-              <h2 className="font-display text-xl font-semibold">Tag your first creator (optional)</h2>
+              <h2 className="font-display text-xl font-semibold">Add a creator channel to monitor</h2>
               <p className="text-xs text-muted-foreground mt-1">
-                Add a creator now or skip and configure creators inside the dashboard.
+                Clip Network watches this channel for latest &amp; newly uploaded videos and starts clipping automatically.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
-                <Label>Handle</Label>
+                <Label>Creator Handle</Label>
                 <Input placeholder="lacy" value={creatorHandle} onChange={(e) => setCreatorHandle(e.target.value)} />
               </div>
               <div className="space-y-1">
@@ -218,7 +259,7 @@ export default function OnboardingPage() {
               <div className="flex gap-2">
                 <Button variant="outline" onClick={() => setStep(4)}>Skip</Button>
                 <Button onClick={handleAddFirstCreator} disabled={busy}>
-                  {busy ? 'Saving...' : 'Save & Continue'}
+                  {busy ? 'Adding...' : 'Add Channel & Continue'}
                 </Button>
               </div>
             </div>
@@ -228,14 +269,14 @@ export default function OnboardingPage() {
         {step === 4 && (
           <div className="space-y-4">
             <div>
-              <h2 className="font-display text-xl font-semibold">Connect a social destination (optional)</h2>
+              <h2 className="font-display text-xl font-semibold">Connect your posting account</h2>
               <p className="text-xs text-muted-foreground mt-1">
-                Human approval stays enabled by default. You can skip and connect accounts later.
+                We will automatically route compliant clips from {creatorName || 'your creator'} to this destination.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
-                <Label>Platform</Label>
+                <Label>Destination Platform</Label>
                 <select
                   className="h-10 w-full rounded-md border border-input bg-background px-3 text-xs"
                   value={socialPlatform}
@@ -248,16 +289,25 @@ export default function OnboardingPage() {
                 </select>
               </div>
               <div className="space-y-1">
-                <Label>Account Handle</Label>
-                <Input placeholder="@agency.clips" value={socialHandle} onChange={(e) => setSocialHandle(e.target.value)} />
+                <Label>Posting Account Handle</Label>
+                <Input placeholder="@lacy.clips" value={socialHandle} onChange={(e) => setSocialHandle(e.target.value)} />
               </div>
             </div>
+            <label className="flex items-center justify-between rounded-md border border-border bg-background p-3 text-xs">
+              <div>
+                <div className="font-medium">Auto-publish compliant clips &amp; track insights</div>
+                <div className="text-[11px] text-muted-foreground">
+                  Turn off to hold clips in the Human Approval Queue first.
+                </div>
+              </div>
+              <Switch checked={autoPublish} onCheckedChange={setAutoPublish} />
+            </label>
             <div className="flex justify-between pt-2">
               <Button variant="ghost" onClick={() => setStep(3)}>Back</Button>
               <div className="flex gap-2">
                 <Button variant="outline" onClick={() => setStep(5)}>Skip</Button>
                 <Button onClick={handleAddSocial} disabled={busy}>
-                  {busy ? 'Linking...' : 'Link & Continue'}
+                  {busy ? 'Linking...' : 'Link Account & Continue'}
                 </Button>
               </div>
             </div>
@@ -269,18 +319,30 @@ export default function OnboardingPage() {
             <div className="flex items-start gap-3 rounded-md border border-border bg-background p-4">
               <CheckCircle2 className="h-5 w-5 text-primary shrink-0 mt-0.5" />
               <div className="space-y-1 text-xs">
-                <div className="font-semibold text-foreground">Workspace configured</div>
+                <div className="font-semibold text-foreground">Automated pipeline ready</div>
                 <p className="text-muted-foreground">
-                  Workspace <strong className="text-foreground">{wsName}</strong> ({workflowRole}) is
-                  ready on the Free plan (10 clips/month).
+                  {createdCreatorId && createdSocialId
+                    ? `Creator channel linked to posting account. Ready to detect latest uploads, execute clipping, post, and generate insights.`
+                    : `Workspace "${wsName}" is ready on the Free plan (10 clips/month).`}
                 </p>
               </div>
             </div>
+
+            {createdCreatorId && (
+              <label className="flex items-center justify-between rounded-md border border-primary/40 bg-primary/5 p-3 text-xs">
+                <div className="flex items-center gap-2">
+                  <Radio className="h-4 w-4 text-primary" />
+                  <span>Detect latest video &amp; run first automated clip + post now</span>
+                </div>
+                <Switch checked={runInitialScan} onCheckedChange={setRunInitialScan} />
+              </label>
+            )}
+
             <div className="flex justify-between pt-2">
               <Button variant="ghost" onClick={() => setStep(4)}>Back</Button>
               <Button onClick={handleComplete} disabled={busy}>
                 <Rocket className="mr-1.5 h-4 w-4" />
-                {busy ? 'Launching...' : 'Launch Dashboard'}
+                {busy ? 'Scanning & Launching...' : 'Launch Dashboard'}
               </Button>
             </div>
           </div>
