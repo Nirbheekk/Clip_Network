@@ -14,74 +14,64 @@
     --secondary-foreground: 240 10% 12%;
     --muted: 40 14% 93%;
     --muted-foreground: 240 5% 42%;
-    --accent: 240 10% 94%;
-    --accent-foreground: 240 10% 10%;
-    --destructive: 0 84% 58%;
+    --accent: 72 80% 42%;
+    --accent-foreground: 240 10% 7%;
+    --destructive: 0 80% 52%;
     --destructive-foreground: 0 0% 100%;
-    --border: 240 6% 88%;
-    --input: 240 6% 85%;
+    --border: 40 8% 86%;
+    --input: 40 8% 82%;
     --ring: 240 10% 10%;
-    --success: 142 71% 40%;
-    --warning: 38 92% 48%;
-    --radius: 0.875rem;
+    --success: 142 71% 36%;
+    --warning: 38 92% 46%;
+    --radius: 0.5rem;
   }
 
   .dark {
     --background: 240 10% 3.9%;
     --foreground: 0 0% 98%;
-    --card: 240 6% 8%;
+    --card: 240 6% 7%;
     --card-foreground: 0 0% 98%;
     --primary: 72 100% 50%;
     --primary-foreground: 240 10% 4%;
-    --secondary: 240 5% 13%;
+    --secondary: 240 5% 12%;
     --secondary-foreground: 0 0% 94%;
-    --muted: 240 5% 12%;
-    --muted-foreground: 240 5% 58%;
+    --muted: 240 5% 11%;
+    --muted-foreground: 240 5% 60%;
     --accent: 72 100% 50%;
     --accent-foreground: 240 10% 4%;
-    --destructive: 342 90% 56%;
+    --destructive: 348 83% 54%;
     --destructive-foreground: 0 0% 100%;
-    --border: 240 5% 16%;
-    --input: 240 5% 18%;
+    --border: 240 4% 16%;
+    --input: 240 4% 18%;
     --ring: 72 100% 50%;
-    --success: 142 72% 48%;
-    --warning: 38 95% 55%;
+    --success: 142 72% 46%;
+    --warning: 38 95% 54%;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
     @apply bg-background text-foreground antialiased selection:bg-primary selection:text-primary-foreground;
     font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
   h1, h2, h3, .font-display {
     font-family: var(--font-display), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.025em;
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 }
 
-.studio-hero-glow {
-  background:
-    radial-gradient(60% 50% at 50% 0%, rgba(212, 255, 0, 0.14) 0%, rgba(0, 184, 255, 0.06) 45%, transparent 100%);
-}
-
-:root:not(.dark) .studio-hero-glow {
-  background:
-    radial-gradient(65% 55% at 50% 15%, rgba(91, 141, 239, 0.22) 0%, rgba(184, 122, 248, 0.18) 38%, rgba(255, 77, 141, 0.14) 68%, transparent 100%);
-}
-
-.studio-grid-bg {
-  background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 48px 48px;
-}
-
-:root:not(.dark) .studio-grid-bg {
-  background-image:
-    linear-gradient(to right, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
-  background-size: 48px 48px;
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

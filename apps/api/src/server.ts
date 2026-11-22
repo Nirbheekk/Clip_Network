@@ -1610,5 +1610,291 @@ export function buildServer(prisma: PrismaClient): FastifyInstance {
     return { success: true, data: updated };
   });
 
+  // ============================================================================
+  // 11. Extended Resource Detail, CRUD, Live Compliance, Analytics & Members
+  // ============================================================================
+
+  app.post('/api/v1/auth/resend-verification', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    if (ctx.emailVerified) {
+      return { success: true, data: { emailVerified: true, message: 'Email is already verified.' } };
+    }
+    const rawToken = generateOpaqueToken(24);
+    await prisma.user.update({
+      where: { id: ctx.userId },
+      data: { emailVerificationToken: sha256Hex(rawToken) },
+    });
+    return {
+      success: true,
+      data: {
+        message: 'A new verification token has been issued.',
+        ...(isProd ? {} : { devVerificationToken: rawToken }),
+      },
+    };
+  });
+
+  app.get('/api/v1/creators/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const creator = await prisma.creatorAccount.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+      include: {
+        routes: { include: { socialAccount: true } },
+        clips: { orderBy: { createdAt: 'desc' }, take: 20 },
+      },
+    });
+    if (!creator) {
+      return reply.status(404).send({ success: false, error: 'Creator not found' });
+    }
+    return {
+      success: true,
+      data: {
+        ...creator,
+        tags: JSON.parse(creator.tagsJson) as string[],
+        requiredTopics: JSON.parse(creator.requiredTopicsJson) as string[],
+        bannedKeywords: JSON.parse(creator.bannedKeywordsJson) as string[],
+      },
+    };
+  });
+
+  app.patch('/api/v1/creators/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const existing = await prisma.creatorAccount.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ success: false, error: 'Creator not found' });
+    }
+    const body = (request.body ?? {}) as {
+      displayName?: string;
+      channelUrl?: string;
+      requiredTopics?: string[];
+      bannedKeywords?: string[];
+      disallowLogos?: boolean;
+      enableSfx?: boolean;
+    };
+    const updated = await prisma.creatorAccount.update({
+      where: { id: existing.id },
+      data: {
+        ...(body.displayName ? { displayName: body.displayName } : {}),
+        ...(body.channelUrl ? { channelUrl: body.channelUrl } : {}),
+        ...(body.requiredTopics ? { requiredTopicsJson: JSON.stringify(body.requiredTopics) } : {}),
+        ...(body.bannedKeywords ? { bannedKeywordsJson: JSON.stringify(body.bannedKeywords) } : {}),
+        ...(typeof body.disallowLogos === 'boolean' ? { disallowLogos: body.disallowLogos } : {}),
+        ...(typeof body.enableSfx === 'boolean' ? { enableSfx: body.enableSfx } : {}),
+      },
+    });
+    await logAudit('CREATOR_UPDATED', 'CreatorAccount', updated.id, { displayName: updated.displayName }, ctx.workspaceId, ctx.userId);
+    return {
+      success: true,
+      data: {
+        ...updated,
+        tags: JSON.parse(updated.tagsJson) as string[],
+        requiredTopics: JSON.parse(updated.requiredTopicsJson) as string[],
+        bannedKeywords: JSON.parse(updated.bannedKeywordsJson) as string[],
+      },
+    };
+  });
+
+  app.delete('/api/v1/creators/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'ADMIN');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const existing = await prisma.creatorAccount.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ success: false, error: 'Creator not found' });
+    }
+    await prisma.creatorAccount.delete({ where: { id: existing.id } });
+    await logAudit('CREATOR_DELETED', 'CreatorAccount', existing.id, { handle: existing.handle }, ctx.workspaceId, ctx.userId);
+    return { success: true };
+  });
+
+  app.delete('/api/v1/social-accounts/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const existing = await prisma.socialAccount.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ success: false, error: 'Social account not found' });
+    }
+    await prisma.socialAccount.delete({ where: { id: existing.id } });
+    await logAudit('SOCIAL_ACCOUNT_DISCONNECTED', 'SocialAccount', existing.id, { accountHandle: existing.accountHandle }, ctx.workspaceId, ctx.userId);
+    return { success: true };
+  });
+
+  app.patch('/api/v1/routes/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const existing = await prisma.creatorRouteRule.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ success: false, error: 'Route rule not found' });
+    }
+    const body = (request.body ?? {}) as { enabled?: boolean; minComplianceScore?: number };
+    const updated = await prisma.creatorRouteRule.update({
+      where: { id: existing.id },
+      data: {
+        ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+        ...(typeof body.minComplianceScore === 'number' ? { minComplianceScore: body.minComplianceScore } : {}),
+      },
+      include: { creator: true, socialAccount: true },
+    });
+    return { success: true, data: { ...updated, hashtags: JSON.parse(updated.hashtagsJson) as string[] } };
+  });
+
+  app.delete('/api/v1/routes/:id', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'MEMBER');
+    if (!ctx) return;
+    const { id } = request.params as { id: string };
+    const existing = await prisma.creatorRouteRule.findFirst({
+      where: { id, workspaceId: ctx.workspaceId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ success: false, error: 'Route rule not found' });
+    }
+    await prisma.creatorRouteRule.delete({ where: { id: existing.id } });
+    return { success: true };
+  });
+
+  app.get('/api/v1/clips/:clipId', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const { clipId } = request.params as { clipId: string };
+    const clip = await prisma.clipJob.findFirst({
+      where: { id: clipId, workspaceId: ctx.workspaceId },
+      include: {
+        creator: true,
+        publishPosts: { include: { socialAccount: true }, orderBy: { createdAt: 'desc' } },
+      },
+    });
+    if (!clip) {
+      return reply.status(404).send({ success: false, error: 'Clip not found' });
+    }
+    return {
+      success: true,
+      data: {
+        ...clip,
+        sfxCues: JSON.parse(clip.sfxCuesJson),
+        complianceReport: JSON.parse(clip.complianceReportJson),
+        executionLogs: JSON.parse(clip.executionLogsJson) as string[],
+      },
+    };
+  });
+
+  app.post('/api/v1/compliance/evaluate', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const body = (request.body ?? {}) as {
+      transcript?: string;
+      caption?: string;
+      requiredTopics?: string[];
+      bannedKeywords?: string[];
+      disallowLogos?: boolean;
+      hasAddedLogos?: boolean;
+    };
+    const result = evaluateClipCompliance({
+      transcript: body.transcript ?? '',
+      caption: body.caption ?? '',
+      requiredTopics: body.requiredTopics ?? [],
+      bannedKeywords: body.bannedKeywords ?? [],
+      disallowLogos: body.disallowLogos ?? true,
+      hasAddedLogos: body.hasAddedLogos ?? false,
+    });
+    return { success: true, data: result };
+  });
+
+  app.get('/api/v1/analytics', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const [workspace, clips, posts, creators] = await Promise.all([
+      prisma.workspace.findUnique({ where: { id: ctx.workspaceId } }),
+      prisma.clipJob.findMany({ where: { workspaceId: ctx.workspaceId } }),
+      prisma.publishPost.findMany({ where: { workspaceId: ctx.workspaceId } }),
+      prisma.creatorAccount.findMany({
+        where: { workspaceId: ctx.workspaceId },
+        include: { _count: { select: { clips: true, routes: true } } },
+      }),
+    ]);
+
+    const totalClips = clips.length;
+    const compliantCount = clips.filter((c) => c.compliancePassed).length;
+    const approvedCount = clips.filter((c) => c.approvalStatus === 'APPROVED').length;
+    const pendingCount = clips.filter((c) => c.approvalStatus === 'AWAITING_APPROVAL').length;
+    const failedCount = clips.filter((c) => c.executionStatus === 'FAILED').length;
+    const avgDurationMs =
+      totalClips > 0
+        ? Math.round(clips.reduce((acc, c) => acc + c.durationMs, 0) / totalClips)
+        : 0;
+    const publishedCount = posts.filter((p) => p.status.startsWith('PUBLISHED')).length;
+    const publishSuccessRate =
+      posts.length > 0 ? Math.round((publishedCount / posts.length) * 100) : 0;
+
+    return {
+      success: true,
+      data: {
+        scope: 'OPERATIONAL_METRICS_ONLY',
+        disclaimer:
+          'Metrics reflect Clip Network operational database state. External social views and engagement require connected platform analytics APIs.',
+        totals: {
+          totalClips,
+          compliantCount,
+          compliancePassRate: totalClips > 0 ? Math.round((compliantCount / totalClips) * 100) : 0,
+          approvedCount,
+          approvalRate: totalClips > 0 ? Math.round((approvedCount / totalClips) * 100) : 0,
+          pendingCount,
+          failedCount,
+          avgDurationMs,
+          totalPosts: posts.length,
+          publishedCount,
+          publishSuccessRate,
+          clipsUsedThisPeriod: workspace?.clipsUsedThisPeriod ?? 0,
+          monthlyClipLimit: workspace?.monthlyClipLimit ?? 10,
+        },
+        byCreator: creators.map((c) => ({
+          id: c.id,
+          displayName: c.displayName,
+          handle: c.handle,
+          platform: c.platform,
+          clipsCount: c._count.clips,
+          routesCount: c._count.routes,
+        })),
+      },
+    };
+  });
+
+  app.get('/api/v1/workspace/members', async (request, reply) => {
+    const ctx = await requireAuth(prisma, request, reply, 'VIEWER');
+    if (!ctx) return;
+    const members = await prisma.workspaceMember.findMany({
+      where: { workspaceId: ctx.workspaceId },
+      include: {
+        user: { select: { id: true, name: true, email: true, status: true, emailVerifiedAt: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return {
+      success: true,
+      data: members.map((m) => ({
+        id: m.id,
+        role: m.role,
+        joinedAt: m.createdAt,
+        user: {
+          ...m.user,
+          emailVerified: Boolean(m.user.emailVerifiedAt),
+        },
+      })),
+    };
+  });
+
   return app;
 }

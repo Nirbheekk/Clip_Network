@@ -1,849 +1,668 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import Link from 'next/link';
 import {
+  ArrowRight,
+  Check,
   CheckCircle2,
-  Clapperboard,
-  CreditCard,
+  ChevronDown,
+  Film,
   GitBranch,
-  KeyRound,
-  LifeBuoy,
-  Link2,
-  LogOut,
-  Moon,
-  Play,
-  RefreshCw,
-  RotateCcw,
   Send,
-  ShieldAlert,
   ShieldCheck,
-  Sparkles,
-  Sun,
-  UserPlus,
-  Users,
-  Video,
+  Sliders,
   Volume2,
-  XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Switch } from '@/components/ui/switch';
-import {
-  apiRequest,
-  type ClipJob,
-  type Creator,
-  type PlanDef,
-  type PublishPost,
-  type RouteRule,
-  type SaasUser,
-  type SaasWorkspace,
-  type SocialAccount,
-} from '@/lib/saas-types';
-import { LandingAndAuth } from '@/components/LandingAndAuth';
-import { OnboardingFlow } from '@/components/OnboardingFlow';
-import {
-  BillingView,
-  SettingsAndKeysView,
-  SuperAdminView,
-  SupportAndDocsView,
-} from '@/components/SaasAccountViews';
+import { PublicFooter, PublicNavbar } from '@/components/layout/PublicChrome';
+import { useAuth } from '@/components/providers/AuthProvider';
 
-type AppTab = 'studio' | 'creators' | 'routing' | 'queue' | 'billing' | 'settings' | 'support' | 'admin';
+const WORKFLOW_STEPS = [
+  {
+    num: '01',
+    title: 'Connect creators',
+    desc: 'Tag Twitch, YouTube, and Kick channels with default framing, caption presets, and SFX rules.',
+  },
+  {
+    num: '02',
+    title: 'Define campaign rules',
+    desc: 'Set required topics, banned keywords, and zero-logo enforcement per creator workspace.',
+  },
+  {
+    num: '03',
+    title: 'Generate clips',
+    desc: 'Run the FFmpeg-backed engine for speech-aligned ASS captions, procedural SFX, and 9:16 layout.',
+  },
+  {
+    num: '04',
+    title: 'Review and approve',
+    desc: 'Inspect compliance scores, execution logs, and captions inside the Review Studio before release.',
+  },
+  {
+    num: '05',
+    title: 'Distribute everywhere',
+    desc: 'Route approved clips idempotently to linked Instagram, TikTok, YouTube Shorts, and X accounts.',
+  },
+];
 
-const TOKEN_STORAGE_KEY = 'clip_network_session_token';
+const FAQS = [
+  {
+    q: 'How does Clip Network work?',
+    a: 'You tag source creator channels, define compliance rules and routing targets, and ingest stream moments. The engine aligns captions to speech windows, generates procedural SFX cues, evaluates compliance, and queues approved clips for linked social accounts.',
+  },
+  {
+    q: 'Which creator platforms are supported?',
+    a: 'Source creator channels support Twitch, YouTube, and Kick. Publishing destinations support Instagram Reels, TikTok, YouTube Shorts, and X.',
+  },
+  {
+    q: 'How are clips generated?',
+    a: 'The core engine aligns transcripts to detected speech windows, compiles word-synced ASS subtitles across four caption presets, synthesizes procedural SFX cues, and outputs structured clip jobs with full execution logs.',
+  },
+  {
+    q: 'Can I review clips before publishing?',
+    a: 'Yes. Human approval is enforced by default on every linked social account. Clips stay in AWAITING_APPROVAL until an authorized workspace member approves them.',
+  },
+  {
+    q: 'Does automatic publishing require connected social accounts?',
+    a: 'Yes. Auto-publishing is strictly opt-in per linked social account and only triggers when a clip passes the creator compliance score threshold. Without a configured live publishing provider key, accounts run transparently in SANDBOX_SIMULATED mode.',
+  },
+  {
+    q: 'How does compliance scoring work?',
+    a: 'Every clip is evaluated by the deterministic shared compliance engine against required campaign topics, banned keywords, generic clickbait patterns, and zero-logo rules. Failed clips are disqualified and blocked from publishing.',
+  },
+  {
+    q: 'What happens when my monthly quota is exhausted?',
+    a: 'The API enforces workspace quotas server-side and returns HTTP 402 QUOTA_EXCEEDED before starting new ingest jobs. You can upgrade your plan anytime in Billing without losing existing clips or rules.',
+  },
+  {
+    q: 'Can I cancel my subscription?',
+    a: 'Yes. Workspace admins and owners can cancel immediately from Settings → Billing. The workspace reverts cleanly to the Free tier quota.',
+  },
+  {
+    q: 'Does the platform support agencies?',
+    a: 'Yes. Every workspace is tenant-isolated with role-based access control (OWNER, ADMIN, MEMBER, VIEWER), multiple creator routing rules, API keys, and audit logging.',
+  },
+];
 
-export default function ClipNetworkSaasApp() {
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [booting, setBooting] = useState(true);
-  const [token, setToken] = useState<string | null>(null);
-  const [user, setUser] = useState<SaasUser | null>(null);
-  const [workspace, setWorkspace] = useState<SaasWorkspace | null>(null);
-  const [devVerificationToken, setDevVerificationToken] = useState<string | null>(null);
-  const [plans, setPlans] = useState<PlanDef[]>([]);
-
-  const [activeTab, setActiveTab] = useState<AppTab>('studio');
-  const [banner, setBanner] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // Tenant-scoped studio data
-  const [creators, setCreators] = useState<Creator[]>([]);
-  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
-  const [routes, setRoutes] = useState<RouteRule[]>([]);
-  const [clips, setClips] = useState<ClipJob[]>([]);
-  const [posts, setPosts] = useState<PublishPost[]>([]);
-
-  // Composer form
-  const [ingestCreatorId, setIngestCreatorId] = useState('');
-  const [sourceUrl, setSourceUrl] = useState('https://www.twitch.tv/videos/2933767012');
-  const [clipTitle, setClipTitle] = useState('Lacy GTA 6 Marathon Hype Moment');
-  const [transcriptText, setTranscriptText] = useState(
-    'We are live on the GTA 6 marathon tonight and chat is going absolutely wild!',
-  );
-  const [enableSfx, setEnableSfx] = useState(true);
-
-  // Creator form
-  const [cHandle, setCHandle] = useState('');
-  const [cName, setCName] = useState('');
-  const [cPlatform, setCPlatform] = useState<'TWITCH' | 'YOUTUBE' | 'KICK'>('TWITCH');
-  const [cUrl, setCUrl] = useState('');
-  const [cTopics, setCTopics] = useState('GTA, marathon');
-  const [cBanned, setCBanned] = useState('gambling');
-
-  // Social account form
-  const [aPlatform, setAPlatform] = useState<'INSTAGRAM_REELS' | 'TIKTOK' | 'YOUTUBE_SHORTS' | 'X'>(
-    'INSTAGRAM_REELS',
-  );
-  const [aName, setAName] = useState('');
-  const [aHandle, setAHandle] = useState('');
-  const [aAuto, setAAuto] = useState(false);
-
-  // Route form
-  const [rCreatorId, setRCreatorId] = useState('');
-  const [rAccountId, setRAccountId] = useState('');
-
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === 'dark') root.classList.add('dark');
-    else root.classList.remove('dark');
-  }, [theme]);
-
-  const loadWorkspaceData = useCallback(async (authToken: string) => {
-    const [meRes, cRes, aRes, rRes, clRes, pRes] = await Promise.all([
-      apiRequest<{ user: SaasUser; workspace: SaasWorkspace }>('/api/v1/auth/me', { token: authToken }),
-      apiRequest<Creator[]>('/api/v1/creators', { token: authToken }),
-      apiRequest<SocialAccount[]>('/api/v1/social-accounts', { token: authToken }),
-      apiRequest<RouteRule[]>('/api/v1/routes', { token: authToken }),
-      apiRequest<ClipJob[]>('/api/v1/clips', { token: authToken }),
-      apiRequest<PublishPost[]>('/api/v1/publish-queue', { token: authToken }),
-    ]);
-
-    if (!meRes.ok || !meRes.json.data) {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      setToken(null);
-      setUser(null);
-      setWorkspace(null);
-      return;
-    }
-
-    setUser(meRes.json.data.user);
-    setWorkspace(meRes.json.data.workspace);
-
-    if (cRes.ok && cRes.json.data) {
-      setCreators(cRes.json.data);
-      if (cRes.json.data[0] && !ingestCreatorId) {
-        setIngestCreatorId(cRes.json.data[0].id);
-        setRCreatorId(cRes.json.data[0].id);
-      }
-    }
-    if (aRes.ok && aRes.json.data) {
-      setAccounts(aRes.json.data);
-      if (aRes.json.data[0] && !rAccountId) {
-        setRAccountId(aRes.json.data[0].id);
-      }
-    }
-    if (rRes.ok && rRes.json.data) setRoutes(rRes.json.data);
-    if (clRes.ok && clRes.json.data) setClips(clRes.json.data);
-    if (pRes.ok && pRes.json.data) setPosts(pRes.json.data);
-  }, [ingestCreatorId, rAccountId]);
-
-  useEffect(() => {
-    async function boot() {
-      const plansRes = await apiRequest<PlanDef[]>('/api/v1/billing/plans');
-      if (plansRes.ok && plansRes.json.data) setPlans(plansRes.json.data);
-
-      const savedToken =
-        typeof window !== 'undefined' ? localStorage.getItem(TOKEN_STORAGE_KEY) : null;
-      if (savedToken) {
-        setToken(savedToken);
-        await loadWorkspaceData(savedToken);
-      }
-      setBooting(false);
-    }
-    void boot();
-  }, [loadWorkspaceData]);
-
-  async function handleLogout() {
-    if (token) {
-      await apiRequest('/api/v1/auth/logout', { method: 'POST', token });
-    }
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    setToken(null);
-    setUser(null);
-    setWorkspace(null);
-    setActiveTab('studio');
-  }
-
-  async function handleCreateCreator(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token) return;
-    setBusy(true);
-    const res = await apiRequest('/api/v1/creators', {
-      method: 'POST',
-      token,
-      body: {
-        handle: cHandle.trim(),
-        displayName: cName.trim(),
-        platform: cPlatform,
-        channelUrl: cUrl.trim() || `https://www.twitch.tv/${cHandle.trim()}`,
-        tags: [cHandle.trim()],
-        requiredTopics: cTopics.split(',').map((s) => s.trim()).filter(Boolean),
-        bannedKeywords: cBanned.split(',').map((s) => s.trim()).filter(Boolean),
-        disallowLogos: true,
-        enableSfx: true,
-      },
-    });
-    setBusy(false);
-    if (res.ok) {
-      setCHandle('');
-      setCName('');
-      setCUrl('');
-      await loadWorkspaceData(token);
-      setBanner('Creator tagged and saved to your workspace.');
-    } else {
-      setBanner(typeof res.json.error === 'string' ? res.json.error : 'Could not tag creator.');
-    }
-  }
-
-  async function handleLinkAccount(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token) return;
-    setBusy(true);
-    const res = await apiRequest('/api/v1/social-accounts', {
-      method: 'POST',
-      token,
-      body: {
-        platform: aPlatform,
-        accountName: aName.trim(),
-        accountHandle: aHandle.trim(),
-        autoPublishApproved: aAuto,
-      },
-    });
-    setBusy(false);
-    if (res.ok) {
-      setAName('');
-      setAHandle('');
-      await loadWorkspaceData(token);
-      setBanner('Social clipping account linked.');
-    } else {
-      setBanner(typeof res.json.error === 'string' ? res.json.error : 'Could not link account.');
-    }
-  }
-
-  async function handleCreateRoute(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token || !rCreatorId || !rAccountId) return;
-    setBusy(true);
-    const res = await apiRequest('/api/v1/routes', {
-      method: 'POST',
-      token,
-      body: {
-        creatorId: rCreatorId,
-        socialAccountId: rAccountId,
-        minComplianceScore: 75,
-        hashtags: ['clips', 'viral'],
-      },
-    });
-    setBusy(false);
-    if (res.ok) {
-      await loadWorkspaceData(token);
-      setBanner('Creator -> Social Account route activated.');
-    } else {
-      setBanner('Route already exists or invalid selection.');
-    }
-  }
-
-  async function handleIngestClip(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token || !ingestCreatorId) {
-      setBanner('Tag a creator first before ingesting a stream clip.');
-      setActiveTab('creators');
-      return;
-    }
-    setBusy(true);
-    const res = await apiRequest('/api/v1/clips/ingest', {
-      method: 'POST',
-      token,
-      body: {
-        creatorId: ingestCreatorId,
-        sourceUrl,
-        title: clipTitle,
-        startSec: 120,
-        endSec: 145,
-        transcriptText,
-        enableSfx,
-      },
-    });
-    setBusy(false);
-    if (res.ok) {
-      await loadWorkspaceData(token);
-      setBanner('Engine executed: captions aligned, SFX synthesized, compliance scored.');
-    } else if (res.status === 402) {
-      setBanner(typeof res.json.error === 'string' ? res.json.error : 'Monthly clip quota reached. Upgrade in Billing.');
-      setActiveTab('billing');
-    } else {
-      setBanner(typeof res.json.error === 'string' ? res.json.error : 'Clip ingest failed.');
-    }
-  }
-
-  async function handleClipDecision(clipId: string, decision: 'APPROVED' | 'REJECTED') {
-    if (!token) return;
-    const res = await apiRequest(`/api/v1/clips/${clipId}/decision`, {
-      method: 'POST',
-      token,
-      body: { decision },
-    });
-    if (res.ok) {
-      await loadWorkspaceData(token);
-      setBanner(`Clip ${decision.toLowerCase()}.`);
-    }
-  }
-
-  async function handleClipAction(clipId: string, action: 'cancel' | 'retry') {
-    if (!token) return;
-    const res = await apiRequest(`/api/v1/clips/${clipId}/${action}`, {
-      method: 'POST',
-      token,
-    });
-    if (res.ok) {
-      await loadWorkspaceData(token);
-      setBanner(`Clip execution ${action === 'cancel' ? 'cancelled' : 'retried'}.`);
-    }
-  }
-
-  async function handleToggleAutoPublish(accountId: string, nextVal: boolean) {
-    if (!token) return;
-    await apiRequest(`/api/v1/social-accounts/${accountId}/auto-publish`, {
-      method: 'PATCH',
-      token,
-      body: { autoPublishApproved: nextVal },
-    });
-    await loadWorkspaceData(token);
-  }
-
-  async function handleManualPublish(postId: string) {
-    if (!token) return;
-    const res = await apiRequest(`/api/v1/publish-queue/${postId}/publish`, {
-      method: 'POST',
-      token,
-    });
-    if (res.ok) {
-      await loadWorkspaceData(token);
-      setBanner('Post published idempotently.');
-    }
-  }
-
-  if (booting) {
-    return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          <RefreshCw className="h-4 w-4 animate-spin text-primary" />
-          <span>Loading Clip Network SaaS...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!token || !user || !workspace) {
-    return (
-      <LandingAndAuth
-        theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        plans={plans}
-        onAuthenticated={async (payload) => {
-          localStorage.setItem(TOKEN_STORAGE_KEY, payload.token);
-          setToken(payload.token);
-          setUser(payload.user);
-          setWorkspace(payload.workspace);
-          if (payload.devVerificationToken) {
-            setDevVerificationToken(payload.devVerificationToken);
-          }
-          await loadWorkspaceData(payload.token);
-        }}
-      />
-    );
-  }
-
-  if (!user.onboardingCompleted) {
-    return (
-      <OnboardingFlow
-        token={token}
-        user={user}
-        workspace={workspace}
-        plans={plans}
-        devVerificationToken={devVerificationToken}
-        onEmailVerified={() => setUser((u) => (u ? { ...u, emailVerified: true } : u))}
-        onCompleted={async (updatedWorkspace) => {
-          setWorkspace(updatedWorkspace);
-          setUser((u) => (u ? { ...u, onboardingCompleted: true } : u));
-          await loadWorkspaceData(token);
-        }}
-      />
-    );
-  }
-
-  const navItems: Array<{ id: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-    { id: 'studio', label: 'Studio', icon: Sparkles },
-    { id: 'creators', label: 'Creators', icon: Users },
-    { id: 'routing', label: 'Routing', icon: GitBranch },
-    { id: 'queue', label: 'Queue', icon: Send },
-    { id: 'billing', label: 'Billing', icon: CreditCard },
-    { id: 'settings', label: 'Settings', icon: KeyRound },
-    { id: 'support', label: 'Support', icon: LifeBuoy },
-    ...(user.systemRole === 'SUPER_ADMIN'
-      ? [{ id: 'admin' as const, label: 'Admin', icon: ShieldAlert }]
-      : []),
-  ];
+export default function LandingPage() {
+  const { plans } = useAuth();
+  const [openFaq, setOpenFaq] = useState<number | null>(0);
 
   return (
-    <div className="min-h-screen bg-background text-foreground relative overflow-x-hidden">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 -z-10 opacity-90 dark:opacity-100"
-        style={{
-          background:
-            theme === 'dark'
-              ? 'radial-gradient(65% 45% at 50% 0%, rgba(212,255,0,0.08) 0%, rgba(9,9,11,0) 70%)'
-              : 'radial-gradient(70% 50% at 20% 0%, rgba(251,146,60,0.20) 0%, transparent 55%), radial-gradient(60% 45% at 85% 5%, rgba(139,92,246,0.16) 0%, transparent 55%)',
-        }}
-      />
+    <div className="min-h-screen bg-background text-foreground">
+      <PublicNavbar />
 
-      {/* Authenticated SaaS Studio Header */}
-      <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-3 px-4 sm:px-6">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <Clapperboard className="h-4 w-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="truncate font-display text-sm font-semibold">{workspace.name}</span>
-                <Badge variant="outline" className="text-[10px]">{workspace.planTier}</Badge>
+      <main>
+        {/* SECTION 2: HERO + REAL PRODUCT PIPELINE VISUALIZATION */}
+        <section className="border-b border-border">
+          <div className="mx-auto max-w-[1280px] px-4 py-16 sm:px-6 lg:py-24">
+            <div className="grid gap-12 lg:grid-cols-12 lg:items-center">
+              <div className="lg:col-span-6 space-y-6">
+                <div className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                  <span>Creator-Content Distribution Operating System</span>
+                </div>
+
+                <h1 className="font-display text-4xl font-semibold tracking-tight sm:text-5xl lg:text-[54px] leading-[1.05]">
+                  One stream. Infinite shorts. Zero distribution chaos.
+                </h1>
+
+                <p className="max-w-xl text-base leading-relaxed text-muted-foreground">
+                  Turn creator streams into compliant short-form content and distribute approved
+                  clips across every major social platform from one workspace.
+                </p>
+
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  <Button size="lg" className="h-11 px-6 font-medium" asChild>
+                    <Link href="/register">
+                      Start Clipping Free <ArrowRight className="ml-2 h-4 w-4" />
+                    </Link>
+                  </Button>
+                  <Button size="lg" variant="outline" className="h-11 px-6" asChild>
+                    <Link href="/product">Explore the Platform</Link>
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4 border-t border-border pt-6 text-xs">
+                  <div>
+                    <div className="font-mono font-semibold text-foreground">4 Presets</div>
+                    <div className="text-muted-foreground mt-0.5">Word-synced ASS captions</div>
+                  </div>
+                  <div>
+                    <div className="font-mono font-semibold text-foreground">6 SFX Cues</div>
+                    <div className="text-muted-foreground mt-0.5">Procedural audio accents</div>
+                  </div>
+                  <div>
+                    <div className="font-mono font-semibold text-foreground">Default Gate</div>
+                    <div className="text-muted-foreground mt-0.5">Human approval enforced</div>
+                  </div>
+                </div>
               </div>
-              <p className="text-[11px] text-muted-foreground font-mono">
-                {workspace.clipsUsedThisPeriod}/{workspace.monthlyClipLimit} clips used
-              </p>
-            </div>
-          </div>
 
-          <nav className="hidden xl:flex items-center gap-1 rounded-full border border-border/70 bg-secondary/50 p-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
-                    active
-                      ? 'bg-primary text-primary-foreground shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-              title="Toggle Theme"
-            >
-              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleLogout}>
-              <LogOut className="mr-1.5 h-3.5 w-3.5" /> Sign Out
-            </Button>
-          </div>
-        </div>
-
-        {/* Mobile / Tablet Nav */}
-        <div className="flex xl:hidden overflow-x-auto gap-1 border-t border-border/40 px-4 py-2">
-          {navItems.map((item) => (
-            <Button
-              key={item.id}
-              size="sm"
-              variant={activeTab === item.id ? 'default' : 'ghost'}
-              onClick={() => setActiveTab(item.id)}
-              className="shrink-0 text-xs"
-            >
-              {item.label}
-            </Button>
-          ))}
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 space-y-6">
-        {banner && (
-          <div className="flex items-center justify-between rounded-xl border border-primary/40 bg-primary/10 px-4 py-2.5 text-xs">
-            <span>{banner}</span>
-            <button type="button" onClick={() => setBanner(null)} className="text-muted-foreground hover:text-foreground">
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        {/* STUDIO TAB */}
-        {activeTab === 'studio' && (
-          <div className="space-y-8">
-            {/* SaaS KPI Strip */}
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {[
-                { label: 'Total Executions', value: clips.length, sub: `${clips.filter((c) => c.executionStatus === 'COMPLETED').length} completed` },
-                { label: 'Monthly Quota', value: `${workspace.clipsUsedThisPeriod} / ${workspace.monthlyClipLimit}`, sub: `${workspace.planTier} tier` },
-                { label: 'Tagged Creators', value: creators.length, sub: `${routes.length} active routes` },
-                { label: 'Publish Queue', value: posts.length, sub: `${posts.filter((p) => p.status.startsWith('PUBLISHED')).length} published` },
-              ].map((m) => (
-                <Card key={m.label} className="border-border/70 bg-card/80">
-                  <CardContent className="pt-5">
-                    <div className="text-xs text-muted-foreground">{m.label}</div>
-                    <div className="font-display text-2xl font-bold mt-1">{m.value}</div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5">{m.sub}</div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-
-            {/* Floating Stream Composer */}
-            <Card className="border-border/80 bg-card/90 shadow-xl backdrop-blur-xl">
-              <CardHeader>
-                <CardTitle className="font-display text-lg flex items-center gap-2">
-                  <Video className="h-4 w-4 text-primary" /> Stream-to-Short Engine Composer
-                </CardTitle>
-                <CardDescription>
-                  Ingest a stream clip, run compliance scoring, align voice-synced captions, synthesize SFX, and route to linked accounts.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form onSubmit={handleIngestClip} className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <Label>Tagged Creator</Label>
-                    <select
-                      className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                      value={ingestCreatorId}
-                      onChange={(e) => setIngestCreatorId(e.target.value)}
-                    >
-                      {creators.length === 0 && <option value="">No creators tagged yet — go to Creators tab</option>}
-                      {creators.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.displayName} (@{c.handle} • {c.platform})
-                        </option>
-                      ))}
-                    </select>
+              {/* Authentic Product Pipeline Representation */}
+              <div className="lg:col-span-6">
+                <div className="rounded-lg border border-border bg-card overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-border px-4 py-2.5 text-[11px] font-mono text-muted-foreground">
+                    <span>clip-engine / pipeline-inspector</span>
+                    <span className="text-foreground">status: READY</span>
                   </div>
-                  <div className="space-y-1.5">
-                    <Label>Stream / VOD URL</Label>
-                    <Input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} required />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Clip Hook / Title</Label>
-                    <Input value={clipTitle} onChange={(e) => setClipTitle(e.target.value)} required />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Transcript Excerpt (for Compliance &amp; Subtitle Alignment)</Label>
-                    <Input value={transcriptText} onChange={(e) => setTranscriptText(e.target.value)} required />
-                  </div>
-                  <div className="flex items-center justify-between md:col-span-2 pt-2">
-                    <div className="flex items-center gap-2">
-                      <Switch checked={enableSfx} onCheckedChange={setEnableSfx} />
-                      <span className="text-xs text-muted-foreground flex items-center gap-1">
-                        <Volume2 className="h-3.5 w-3.5 text-primary" /> Procedural SFX Pack Enabled
-                      </span>
-                    </div>
-                    <Button type="submit" disabled={busy}>
-                      <Play className="mr-1.5 h-3.5 w-3.5" />
-                      {busy ? 'Running Engine...' : 'Execute Clip Engine'}
-                    </Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
 
-            {/* 9:16 Cinema Gallery & Execution Lifecycle */}
-            <div className="space-y-3">
-              <h2 className="font-display text-lg font-semibold">Recent Engine Executions</h2>
-              {clips.length === 0 ? (
-                <Card className="border-dashed border-border/70 bg-card/40">
-                  <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    No clips executed yet. Tag a creator in the Creators tab, then run the Stream Composer above.
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {clips.map((clip) => (
-                    <Card key={clip.id} className="border-border/70 bg-card/85 flex flex-col justify-between">
-                      <CardHeader className="pb-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <Badge variant={clip.executionStatus === 'COMPLETED' ? 'default' : 'outline'}>
-                            {clip.executionStatus} • {clip.durationMs}ms
-                          </Badge>
-                          <Badge variant={clip.compliancePassed ? 'secondary' : 'destructive'}>
-                            Score {clip.complianceScore}/100
-                          </Badge>
+                  <div className="grid sm:grid-cols-12 divide-y sm:divide-y-0 sm:divide-x divide-border">
+                    {/* Left: Vertical 9:16 Clip Surface */}
+                    <div className="sm:col-span-5 p-4 flex flex-col justify-between bg-background/60">
+                      <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
+                        <span>9:16 VERTICAL</span>
+                        <span>00:22s</span>
+                      </div>
+                      <div className="my-6 space-y-3">
+                        <div className="rounded border border-border bg-card p-3 text-center space-y-1">
+                          <div className="text-[10px] font-mono uppercase text-muted-foreground">
+                            Gameplay / Main Frame
+                          </div>
+                          <div className="h-12 rounded bg-secondary/70 flex items-center justify-center text-[11px] font-mono text-muted-foreground">
+                            1080 × 1220 crop
+                          </div>
                         </div>
-                        <CardTitle className="font-display text-base pt-2">{clip.title}</CardTitle>
-                        <CardDescription className="text-xs">
-                          {clip.creator?.displayName ?? 'Creator'} • {clip.layout} • {clip.approvalStatus}
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        <div className="rounded-lg bg-background/70 p-2.5 font-mono text-[10px] text-muted-foreground max-h-24 overflow-y-auto space-y-0.5">
-                          {(clip.executionLogs ?? []).map((line, i) => (
-                            <div key={i} className="truncate">{line}</div>
+                        <div className="rounded border border-primary/50 bg-background px-2.5 py-2 text-center">
+                          <span className="font-display text-xs font-bold tracking-wide uppercase">
+                            &ldquo;GTA 6 <span className="text-primary">MARATHON</span> TONIGHT&rdquo;
+                          </span>
+                          <div className="text-[10px] font-mono text-muted-foreground mt-0.5">
+                            HIGH_ENERGY • speech-aligned
+                          </div>
+                        </div>
+                        <div className="rounded border border-border bg-card p-2 text-center">
+                          <div className="text-[10px] font-mono uppercase text-muted-foreground">
+                            Split Facecam Crop
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
+                        <span>SFX: WHOOSH + POP</span>
+                        <span>0 LOGOS</span>
+                      </div>
+                    </div>
+
+                    {/* Right: Compliance, Approval & Destinations */}
+                    <div className="sm:col-span-7 p-4 space-y-4">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium">Campaign Compliance</span>
+                          <Badge className="font-mono text-[10px]">100 / 100 PASS</Badge>
+                        </div>
+                        <div className="space-y-1 text-[11px] text-muted-foreground">
+                          <div className="flex items-center justify-between">
+                            <span>Required topic match</span>
+                            <span className="font-mono text-foreground">GTA, marathon</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Banned keywords</span>
+                            <span className="font-mono text-foreground">0 detected</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Zero-logo policy</span>
+                            <span className="font-mono text-foreground">Enforced</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="border-t border-border pt-3 space-y-2">
+                        <div className="text-xs font-medium">Approval &amp; Distribution</div>
+                        <div className="space-y-1.5 text-[11px]">
+                          {[
+                            { acct: '@agency.reels', plat: 'Instagram Reels', mode: 'Human Approval Gate' },
+                            { acct: '@agency.tiktok', plat: 'TikTok', mode: 'Opt-in Auto-Publish' },
+                            { acct: '@agency.shorts', plat: 'YouTube Shorts', mode: 'Human Approval Gate' },
+                          ].map((d) => (
+                            <div
+                              key={d.acct}
+                              className="flex items-center justify-between rounded border border-border px-2.5 py-1.5 bg-background/50"
+                            >
+                              <div>
+                                <div className="font-medium text-foreground">{d.acct}</div>
+                                <div className="text-[10px] text-muted-foreground">{d.plat}</div>
+                              </div>
+                              <span className="font-mono text-[10px] text-muted-foreground">{d.mode}</span>
+                            </div>
                           ))}
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {clip.approvalStatus === 'AWAITING_APPROVAL' && clip.compliancePassed && (
-                            <>
-                              <Button size="sm" onClick={() => handleClipDecision(clip.id, 'APPROVED')}>
-                                <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve &amp; Publish
-                              </Button>
-                              <Button size="sm" variant="outline" onClick={() => handleClipDecision(clip.id, 'REJECTED')}>
-                                <XCircle className="mr-1 h-3.5 w-3.5" /> Reject
-                              </Button>
-                            </>
-                          )}
-                          {clip.executionStatus !== 'CANCELLED' ? (
-                            <Button size="sm" variant="ghost" onClick={() => handleClipAction(clip.id, 'cancel')}>
-                              Cancel
-                            </Button>
-                          ) : (
-                            <Button size="sm" variant="outline" onClick={() => handleClipAction(clip.id, 'retry')}>
-                              <RotateCcw className="mr-1 h-3.5 w-3.5" /> Retry
-                            </Button>
-                          )}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
           </div>
-        )}
+        </section>
 
-        {/* CREATORS TAB */}
-        {activeTab === 'creators' && (
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card className="border-border/70 bg-card/85">
-              <CardHeader>
-                <CardTitle className="font-display text-base flex items-center gap-2">
-                  <UserPlus className="h-4 w-4 text-primary" /> Tag Creator Account
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <form onSubmit={handleCreateCreator} className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <Input required placeholder="Handle (e.g. lacy)" value={cHandle} onChange={(e) => setCHandle(e.target.value)} />
-                    <Input required placeholder="Display Name (e.g. Lacy)" value={cName} onChange={(e) => setCName(e.target.value)} />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <select
-                      className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                      value={cPlatform}
-                      onChange={(e) => setCPlatform(e.target.value as 'TWITCH' | 'YOUTUBE' | 'KICK')}
+        {/* SECTION 3: PLATFORM SUPPORT (SOURCE VS DESTINATION) */}
+        <section className="border-b border-border bg-card/40">
+          <div className="mx-auto max-w-[1280px] px-4 py-10 sm:px-6">
+            <div className="grid gap-6 md:grid-cols-2 md:divide-x divide-border">
+              <div className="space-y-2.5">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-muted-foreground">
+                  Creator Source Channels
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {['Twitch', 'YouTube', 'Kick'].map((p) => (
+                    <span
+                      key={p}
+                      className="rounded border border-border bg-background px-3 py-1.5 text-xs font-medium"
                     >
-                      <option value="TWITCH">TWITCH</option>
-                      <option value="YOUTUBE">YOUTUBE</option>
-                      <option value="KICK">KICK</option>
-                    </select>
-                    <Input placeholder="Channel URL" value={cUrl} onChange={(e) => setCUrl(e.target.value)} />
-                  </div>
-                  <Input placeholder="Required topics (comma-separated)" value={cTopics} onChange={(e) => setCTopics(e.target.value)} />
-                  <Input placeholder="Banned keywords (comma-separated)" value={cBanned} onChange={(e) => setCBanned(e.target.value)} />
-                  <Button type="submit" disabled={busy}>Tag Creator</Button>
-                </form>
-              </CardContent>
-            </Card>
+                      {p}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="md:pl-8 space-y-2.5">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-muted-foreground">
+                  Publishing Destinations (OAuth Vault / Sandbox Mode)
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {['Instagram Reels', 'TikTok', 'YouTube Shorts', 'X'].map((p) => (
+                    <span
+                      key={p}
+                      className="rounded border border-border bg-background px-3 py-1.5 text-xs font-medium"
+                    >
+                      {p}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
 
-            <Card className="border-border/70 bg-card/85">
-              <CardHeader>
-                <CardTitle className="font-display text-base">Workspace Creators ({creators.length})</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2.5">
-                {creators.map((c) => (
-                  <div key={c.id} className="rounded-lg border border-border/60 p-3 text-xs space-y-1">
+        {/* SECTION 4: PROBLEM AND SOLUTION */}
+        <section className="border-b border-border">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 space-y-12">
+            <div className="max-w-2xl space-y-3">
+              <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                Why Clip Network Exists
+              </div>
+              <h2 className="font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+                Clipping is easy. Managing distribution is not.
+              </h2>
+            </div>
+
+            <div className="divide-y divide-border border-y border-border">
+              {[
+                {
+                  problem: 'Manual clipping workflows',
+                  issue:
+                    'Downloading VODs, re-timing subtitles by hand, adding SFX, and exporting separate files for every account wastes hours per stream.',
+                  solution:
+                    'Ingest once. The engine aligns transcripts to speech windows, compiles ASS captions, schedules procedural SFX, and tracks execution logs automatically.',
+                },
+                {
+                  problem: 'Campaign compliance mistakes',
+                  issue:
+                    'A single off-topic clip, banned keyword, or accidental watermark can disqualify an entire sponsored creator campaign.',
+                  solution:
+                    'Every clip is scored deterministically against required topics, banned keywords, clickbait filters, and zero-logo rules before it reaches any queue.',
+                },
+                {
+                  problem: 'Fragmented publishing operations',
+                  issue:
+                    'Agencies juggle spreadsheets, shared logins, and duplicate uploads across dozens of fan and clipping pages.',
+                  solution:
+                    'Centralize routing rules per creator, store tokens encrypted with AES-256-GCM, and publish idempotently behind a workspace-scoped approval gate.',
+                },
+              ].map((row) => (
+                <div key={row.problem} className="grid gap-6 py-8 md:grid-cols-12">
+                  <div className="md:col-span-4">
+                    <h3 className="font-display text-lg font-semibold">{row.problem}</h3>
+                  </div>
+                  <div className="md:col-span-4 text-sm text-muted-foreground leading-relaxed">
+                    <div className="text-[11px] font-mono uppercase text-destructive mb-1">Bottleneck</div>
+                    {row.issue}
+                  </div>
+                  <div className="md:col-span-4 text-sm leading-relaxed">
+                    <div className="text-[11px] font-mono uppercase text-primary mb-1">Clip Network</div>
+                    {row.solution}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 5: 5-STEP PRODUCT WORKFLOW */}
+        <section id="how-it-works" className="border-b border-border bg-card/30">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 space-y-12">
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+              <div className="space-y-2 max-w-xl">
+                <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                  Operational Pipeline
+                </div>
+                <h2 className="font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+                  Five deterministic stages from VOD to feed.
+                </h2>
+              </div>
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/product">Read full architecture →</Link>
+              </Button>
+            </div>
+
+            <div className="grid gap-px bg-border border border-border md:grid-cols-5">
+              {WORKFLOW_STEPS.map((s) => (
+                <div key={s.num} className="bg-background p-6 space-y-3">
+                  <div className="font-mono text-xs text-primary">{s.num}</div>
+                  <h3 className="font-display text-base font-semibold">{s.title}</h3>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{s.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 6: DIFFERENTIATED CORE FEATURES */}
+        <section id="features" className="border-b border-border">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 space-y-12">
+            <div className="max-w-2xl space-y-2">
+              <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                Platform Capabilities
+              </div>
+              <h2 className="font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+                Engineered for clipping teams, not novelty demos.
+              </h2>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-12">
+              <div className="lg:col-span-7 rounded-lg border border-border bg-card p-6 sm:p-8 flex flex-col justify-between space-y-6">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                    <Film className="h-3.5 w-3.5 text-primary" />
+                    <span>SPEECH-ALIGNED CAPTIONS &amp; VERTICAL FRAMING</span>
+                  </div>
+                  <h3 className="font-display text-2xl font-semibold">
+                    Subtitles locked to actual speaker cadence.
+                  </h3>
+                  <p className="text-sm text-muted-foreground max-w-xl">
+                    Choose between <code className="font-mono text-foreground">HIGH_ENERGY</code>,{' '}
+                    <code className="font-mono text-foreground">BOLD_CREATOR</code>,{' '}
+                    <code className="font-mono text-foreground">CLEAN_MINIMAL</code>, and{' '}
+                    <code className="font-mono text-foreground">PODCAST_PREMIUM</code> presets with
+                    split-facecam or center-crop 9:16 layouts.
+                  </p>
+                </div>
+                <div className="rounded border border-border bg-background p-4 font-mono text-[11px] text-muted-foreground space-y-1">
+                  <div>[Dialogue: 0:00:00.10 -&gt; 0:00:01.42] We are live on the GTA 6 marathon</div>
+                  <div>[Dialogue: 0:00:01.48 -&gt; 0:00:02.95] tonight and chat is going wild!</div>
+                </div>
+              </div>
+
+              <div className="lg:col-span-5 rounded-lg border border-border bg-card p-6 sm:p-8 space-y-5">
+                <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                  <Volume2 className="h-3.5 w-3.5 text-primary" />
+                  <span>PROCEDURAL SFX ENGINE</span>
+                </div>
+                <h3 className="font-display text-2xl font-semibold">
+                  Cut-synced sound design with zero external stock packs.
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Automatically places <code className="font-mono text-foreground">WHOOSH</code>,{' '}
+                  <code className="font-mono text-foreground">POP</code>,{' '}
+                  <code className="font-mono text-foreground">RISER</code>,{' '}
+                  <code className="font-mono text-foreground">BOOM</code>,{' '}
+                  <code className="font-mono text-foreground">CHIME</code>, and{' '}
+                  <code className="font-mono text-foreground">GLITCH</code> cues on scene cuts.
+                </p>
+                <div className="flex flex-wrap gap-1.5 pt-2">
+                  {['WHOOSH', 'POP', 'RISER', 'BOOM', 'CHIME', 'GLITCH'].map((sfx) => (
+                    <span
+                      key={sfx}
+                      className="rounded border border-border bg-background px-2.5 py-1 font-mono text-[11px]"
+                    >
+                      {sfx}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="lg:col-span-4 rounded-lg border border-border bg-card p-6 space-y-3">
+                <Sliders className="h-4 w-4 text-primary" />
+                <h3 className="font-display text-lg font-semibold">Creator Management</h3>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Maintain per-creator channel metadata, default layouts, caption styles, and
+                  campaign requirements isolated by workspace.
+                </p>
+              </div>
+
+              <div className="lg:col-span-4 rounded-lg border border-border bg-card p-6 space-y-3">
+                <GitBranch className="h-4 w-4 text-primary" />
+                <h3 className="font-display text-lg font-semibold">Multi-Platform Routing</h3>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Map any creator to one or dozens of clipping accounts with minimum compliance
+                  thresholds, custom hashtags, and caption templates.
+                </p>
+              </div>
+
+              <div className="lg:col-span-4 rounded-lg border border-border bg-card p-6 space-y-3">
+                <Send className="h-4 w-4 text-primary" />
+                <h3 className="font-display text-lg font-semibold">Execution Monitoring</h3>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Inspect timestamped engine logs, execution durations, idempotency keys, and
+                  cancel or retry jobs without duplicate publishing.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 7: APPROVAL & COMPLIANCE DIFFERENTIATOR */}
+        <section className="border-b border-border bg-card/30">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6">
+            <div className="grid gap-10 lg:grid-cols-12 lg:items-center">
+              <div className="lg:col-span-6 space-y-4">
+                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-primary">
+                  <ShieldCheck className="h-4 w-4" />
+                  <span>Governance &amp; Brand Safety</span>
+                </div>
+                <h2 className="font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+                  Automation without losing control.
+                </h2>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  Brand campaigns and creator networks cannot afford unvetted uploads. Clip Network
+                  combines deterministic rule checks with a strict human approval gate by default.
+                </p>
+                <ul className="space-y-2.5 pt-2 text-sm">
+                  {[
+                    'Required topic verification against transcript and hook',
+                    'Banned keyword & generic clickbait disqualifiers',
+                    'Zero-logo enforcement policy across rendered clips',
+                    'Human approval required by default; auto-publish is strictly opt-in per account',
+                  ].map((item) => (
+                    <li key={item} className="flex items-start gap-2.5">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="lg:col-span-6 rounded-lg border border-border bg-background p-6 space-y-4">
+                <div className="text-xs font-mono uppercase text-muted-foreground">
+                  Approval Gate State Machine
+                </div>
+                <div className="space-y-3 text-xs">
+                  <div className="flex items-center justify-between rounded border border-border p-3">
+                    <span className="font-mono">1. evaluateClipCompliance()</span>
+                    <Badge variant="outline">Score &gt;= 70 &amp; 0 disqualifiers</Badge>
+                  </div>
+                  <div className="flex items-center justify-between rounded border border-border p-3">
+                    <span className="font-mono">2. ClipJob.approvalStatus</span>
+                    <Badge variant="secondary">AWAITING_APPROVAL (default)</Badge>
+                  </div>
+                  <div className="flex items-center justify-between rounded border border-primary/60 bg-primary/5 p-3">
+                    <span className="font-mono">3. Reviewer Decision / Opt-in Auto</span>
+                    <Badge>APPROVED → Publish Queue</Badge>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 8: USE CASES */}
+        <section className="border-b border-border">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 space-y-10">
+            <h2 className="font-display text-3xl font-semibold tracking-tight">
+              Built for every layer of the clipping economy.
+            </h2>
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                {
+                  role: 'Solo Clippers',
+                  value: 'Turn long streams into captioned, SFX-enhanced shorts across fan pages without manual editing bottlenecks.',
+                },
+                {
+                  role: 'Creator Agencies',
+                  value: 'Operate isolated workspaces with RBAC, multi-creator routing rules, and fast batch review queues.',
+                },
+                {
+                  role: 'Campaign Managers',
+                  value: 'Enforce sponsor talking points, banned keywords, and zero-logo policies automatically before clips publish.',
+                },
+                {
+                  role: 'Social Media Teams',
+                  value: 'Keep final editorial sign-off in one approval queue with idempotent publishing and full audit logs.',
+                },
+              ].map((u) => (
+                <div key={u.role} className="border-t-2 border-border pt-4 space-y-2">
+                  <h3 className="font-display text-base font-semibold">{u.role}</h3>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{u.value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 9: LIVE PRICING PREVIEW (FROM BACKEND SAAS_PLANS) */}
+        <section className="border-b border-border bg-card/30">
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 space-y-10">
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+              <div className="space-y-2">
+                <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                  Pricing
+                </div>
+                <h2 className="font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+                  Predictable quotas. Server-enforced entitlements.
+                </h2>
+              </div>
+              <Button variant="outline" asChild>
+                <Link href="/pricing">Compare Plans</Link>
+              </Button>
+            </div>
+
+            <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-4">
+              {plans.map((p) => (
+                <div
+                  key={p.id}
+                  className={`rounded-lg border p-6 flex flex-col justify-between space-y-6 ${
+                    p.highlighted
+                      ? 'border-primary bg-background'
+                      : 'border-border bg-card'
+                  }`}
+                >
+                  <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="font-semibold">{c.displayName} (@{c.handle})</span>
-                      <Badge variant="outline">{c.platform}</Badge>
+                      <span className="font-display text-base font-semibold">{p.name}</span>
+                      {p.highlighted && <Badge>Recommended</Badge>}
                     </div>
-                    <div className="text-muted-foreground">
-                      Topics: {c.requiredTopics.join(', ') || 'Any'} • Banned: {c.bannedKeywords.join(', ') || 'None'}
+                    <div className="tabular-nums">
+                      <span className="font-display text-3xl font-bold">${p.priceMonthlyUsd}</span>
+                      <span className="text-xs text-muted-foreground"> / month</span>
                     </div>
+                    <p className="text-xs text-muted-foreground">{p.tagline}</p>
+                    <div className="border-t border-border pt-3 space-y-1.5 text-xs font-mono">
+                      <div>{p.monthlyClipLimit.toLocaleString()} clips / month</div>
+                      <div>{p.maxCreators} creators • {p.maxSocialAccounts} social accounts</div>
+                      <div>{p.apiKeysAllowed} API key{p.apiKeysAllowed === 1 ? '' : 's'}</div>
+                    </div>
+                    <ul className="space-y-1.5 pt-2 text-xs text-muted-foreground">
+                      {p.features.map((f) => (
+                        <li key={f} className="flex items-start gap-2">
+                          <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                          <span>{f}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                ))}
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        {/* ROUTING TAB */}
-        {activeTab === 'routing' && (
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card className="border-border/70 bg-card/85">
-              <CardHeader>
-                <CardTitle className="font-display text-base flex items-center gap-2">
-                  <Link2 className="h-4 w-4 text-primary" /> Link Social Clipping Account
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <form onSubmit={handleLinkAccount} className="space-y-3">
-                  <select
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={aPlatform}
-                    onChange={(e) =>
-                      setAPlatform(e.target.value as 'INSTAGRAM_REELS' | 'TIKTOK' | 'YOUTUBE_SHORTS' | 'X')
-                    }
+                  <Button
+                    variant={p.highlighted ? 'default' : 'outline'}
+                    className="w-full"
+                    asChild
                   >
-                    <option value="INSTAGRAM_REELS">INSTAGRAM_REELS</option>
-                    <option value="TIKTOK">TIKTOK</option>
-                    <option value="YOUTUBE_SHORTS">YOUTUBE_SHORTS</option>
-                    <option value="X">X</option>
-                  </select>
-                  <Input required placeholder="Account Name" value={aName} onChange={(e) => setAName(e.target.value)} />
-                  <Input required placeholder="Handle (@lacy.clips)" value={aHandle} onChange={(e) => setAHandle(e.target.value)} />
-                  <div className="flex items-center gap-2">
-                    <Switch checked={aAuto} onCheckedChange={setAAuto} />
-                    <span className="text-xs text-muted-foreground">Opt-in Auto-Publish Compliant Clips</span>
-                  </div>
-                  <Button type="submit" disabled={busy}>Link Account</Button>
-                </form>
-
-                <div className="space-y-2 pt-2">
-                  {accounts.map((a) => (
-                    <div key={a.id} className="flex items-center justify-between rounded-lg border border-border/60 p-2.5 text-xs">
-                      <div>
-                        <div className="font-medium">{a.accountName} ({a.accountHandle})</div>
-                        <div className="text-muted-foreground">{a.platform} • {a.integrationMode}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-muted-foreground">Auto</span>
-                        <Switch
-                          checked={a.autoPublishApproved}
-                          onCheckedChange={(v) => handleToggleAutoPublish(a.id, v)}
-                        />
-                      </div>
-                    </div>
-                  ))}
+                    <Link href="/register">Start with {p.name}</Link>
+                  </Button>
                 </div>
-              </CardContent>
-            </Card>
-
-            <Card className="border-border/70 bg-card/85">
-              <CardHeader>
-                <CardTitle className="font-display text-base flex items-center gap-2">
-                  <GitBranch className="h-4 w-4 text-primary" /> Creator → Account Routing Rules
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <form onSubmit={handleCreateRoute} className="space-y-3">
-                  <select
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={rCreatorId}
-                    onChange={(e) => setRCreatorId(e.target.value)}
-                  >
-                    <option value="">Select Creator</option>
-                    {creators.map((c) => (
-                      <option key={c.id} value={c.id}>{c.displayName} (@{c.handle})</option>
-                    ))}
-                  </select>
-                  <select
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={rAccountId}
-                    onChange={(e) => setRAccountId(e.target.value)}
-                  >
-                    <option value="">Select Social Account</option>
-                    {accounts.map((a) => (
-                      <option key={a.id} value={a.id}>{a.accountHandle} ({a.platform})</option>
-                    ))}
-                  </select>
-                  <Button type="submit" disabled={busy || !rCreatorId || !rAccountId}>Create Route</Button>
-                </form>
-
-                <div className="space-y-2 pt-2">
-                  {routes.map((r) => (
-                    <div key={r.id} className="flex items-center justify-between rounded-lg border border-border/60 p-2.5 text-xs">
-                      <span>
-                        <strong>@{r.creator?.handle}</strong> → <strong>{r.socialAccount?.accountHandle}</strong>
-                      </span>
-                      <Badge variant="outline">Min Score {r.minComplianceScore}</Badge>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
+              ))}
+            </div>
           </div>
-        )}
+        </section>
 
-        {/* QUEUE TAB */}
-        {activeTab === 'queue' && (
-          <Card className="border-border/70 bg-card/85">
-            <CardHeader>
-              <CardTitle className="font-display text-base flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4 text-primary" /> Publish Queue &amp; Distribution Log
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2.5">
-              {posts.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No routed posts yet.</p>
-              ) : (
-                posts.map((p) => (
-                  <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 p-3 text-xs">
-                    <div>
-                      <div className="font-semibold">{p.clipJob?.title ?? 'Clip'} → {p.socialAccount?.accountHandle}</div>
-                      <div className="text-muted-foreground">{p.platform} • {p.executionMode}</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant={p.status.startsWith('PUBLISHED') ? 'default' : 'outline'}>{p.status}</Badge>
-                      {p.status === 'AWAITING_APPROVAL' && (
-                        <Button size="sm" onClick={() => handleManualPublish(p.id)}>Publish Now</Button>
-                      )}
-                    </div>
+        {/* SECTION 10: FAQ */}
+        <section className="border-b border-border">
+          <div className="mx-auto max-w-[960px] px-4 py-20 sm:px-6 space-y-8">
+            <div className="space-y-2">
+              <div className="text-xs font-mono uppercase tracking-wider text-muted-foreground">FAQ</div>
+              <h2 className="font-display text-3xl font-semibold tracking-tight">
+                Questions about the engine, compliance, and billing.
+              </h2>
+            </div>
+
+            <div className="divide-y divide-border border-y border-border">
+              {FAQS.map((item, idx) => {
+                const isOpen = openFaq === idx;
+                return (
+                  <div key={item.q} className="py-4">
+                    <button
+                      type="button"
+                      onClick={() => setOpenFaq(isOpen ? null : idx)}
+                      className="flex w-full items-center justify-between text-left gap-4"
+                    >
+                      <span className="text-sm font-medium">{item.q}</span>
+                      <ChevronDown
+                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                          isOpen ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+                    {isOpen && (
+                      <p className="mt-2.5 text-xs leading-relaxed text-muted-foreground pr-8">
+                        {item.a}
+                      </p>
+                    )}
                   </div>
-                ))
-              )}
-            </CardContent>
-          </Card>
-        )}
+                );
+              })}
+            </div>
+          </div>
+        </section>
 
-        {/* BILLING TAB */}
-        {activeTab === 'billing' && (
-          <BillingView
-            token={token}
-            workspace={workspace}
-            plans={plans}
-            onWorkspaceUpdated={() => loadWorkspaceData(token)}
-            onNotify={setBanner}
-          />
-        )}
-
-        {/* SETTINGS & API KEYS TAB */}
-        {activeTab === 'settings' && (
-          <SettingsAndKeysView
-            token={token}
-            user={user}
-            workspace={workspace}
-            onUpdated={() => loadWorkspaceData(token)}
-            onNotify={setBanner}
-          />
-        )}
-
-        {/* SUPPORT & DOCS TAB */}
-        {activeTab === 'support' && <SupportAndDocsView token={token} onNotify={setBanner} />}
-
-        {/* SUPER-ADMIN TAB */}
-        {activeTab === 'admin' && user.systemRole === 'SUPER_ADMIN' && (
-          <SuperAdminView token={token} onNotify={setBanner} />
-        )}
+        {/* SECTION 11: FINAL CTA */}
+        <section>
+          <div className="mx-auto max-w-[1280px] px-4 py-20 sm:px-6 text-center space-y-6">
+            <h2 className="mx-auto max-w-2xl font-display text-3xl sm:text-4xl font-semibold tracking-tight">
+              Your creators are already streaming. Start turning streams into distribution.
+            </h2>
+            <p className="mx-auto max-w-lg text-sm text-muted-foreground">
+              Start on the Free tier with 10 clips/month, zero credit card required. Upgrade anytime
+              as your clipping network scales.
+            </p>
+            <Button size="lg" className="h-11 px-7 font-medium" asChild>
+              <Link href="/register">
+                Create Your Free Workspace <ArrowRight className="ml-2 h-4 w-4" />
+              </Link>
+            </Button>
+          </div>
+        </section>
       </main>
+
+      <PublicFooter />
     </div>
   );
 }
